@@ -54,21 +54,23 @@ final class RenderTicket: @unchecked Sendable {
 /// `handle(line:)` is called for each request line in order, from one
 /// thread. Cheap requests (`hello`, `builtinPresets`, `presetSettings`,
 /// `close`) answer on that thread; `profileStatus` looks at the disk on a
-/// queue of its own; `open`, `render` and `export` run one at
-/// a time on a serial work queue, so PhotoCore's `RenderEngine` is used
-/// serially, as by the Photo Bench app's `RenderCoordinator` actor, and at
-/// most one full-resolution decode is in memory.
+/// queue of its own; `open`, `render`, `export` and `renderWorkingCopy` run
+/// one at a time on a serial work queue, so PhotoCore's `RenderEngine` (and
+/// `WorkingCopyRenderer`) is used serially, as by the Photo Bench app's
+/// `RenderCoordinator` actor, and at most one full-resolution decode is in
+/// memory.
 ///
 /// A `render` supersedes the photo's previous one: a queued one answers
 /// `cancelled` at once, a running one is cancelled through its
 /// `PreviewCancellation` and answers `cancelled` when it stops. Requests for
-/// other photos and `export`s are never cancelled.
+/// other photos, `export`s and `renderWorkingCopy`s are never cancelled.
 final class EngineSession: @unchecked Sendable {
     static let maximumWorkingCopies = 4
     static let maximumPreviewDimension = 2_560
     static let defaultExportQuality = 0.92
-    /// How long shutdown waits for the job in flight (an `open` or `export`
-    /// cannot be interrupted; a render stops at its next step).
+    /// How long shutdown waits for the job in flight (an `open`, `export` or
+    /// `renderWorkingCopy` cannot be interrupted; a render stops at its next
+    /// step).
     static let shutdownGracePeriod: TimeInterval = 30
 
     private let backend: EngineBackend
@@ -159,6 +161,8 @@ final class EngineSession: @unchecked Sendable {
                 try enqueueRender(request)
             case .export:
                 try enqueueExport(request)
+            case .renderWorkingCopy:
+                try enqueueRenderWorkingCopy(request)
             case .close:
                 try close(request)
             case .shutdown:
@@ -410,6 +414,47 @@ final class EngineSession: @unchecked Sendable {
         }
     }
 
+    // MARK: - renderWorkingCopy
+
+    private func enqueueRenderWorkingCopy(_ request: EngineRequest) throws {
+        let params = try request.decodeParams(RenderWorkingCopyParams.self)
+        let source = try Self.absoluteFileURL(params.path, field: "path")
+        let workingCopy = try Self.absoluteFileURL(params.workingCopyPath, field: "workingCopyPath")
+        let preview = try params.previewPath.map { try Self.absoluteFileURL($0, field: "previewPath") }
+        let maxDimension = try Self.previewDimension(params.maxDimension)
+        let previewMaxDimension = try Self.workingCopyPreviewDimension(params.previewMaxDimension)
+        // As `export`: never overwrite any photo the caller has open.
+        lock.lock()
+        let protectedSources = photos.values.map(\.url)
+        lock.unlock()
+
+        let requestID = request.id
+        let job = WorkingCopyRequest(
+            sourceURL: source,
+            workingCopyURL: workingCopy,
+            previewURL: preview,
+            maxDimension: maxDimension,
+            previewMaxDimension: previewMaxDimension,
+            protectedSourceURLs: protectedSources
+        )
+        workQueue.async { [self] in
+            guard !shuttingDown else { return }
+            let started = DispatchTime.now()
+            do {
+                let rendered = try backend.renderWorkingCopy(job)
+                EngineLog.write(
+                    "renderWorkingCopy \(source.lastPathComponent) \(rendered.width)x\(rendered.height)"
+                        + " \(rendered.kind.rawValue) \(rendered.baseVersion) \(Self.milliseconds(since: started))ms"
+                )
+                send(.success(id: requestID, result: RenderWorkingCopyResult(rendered)))
+            } catch {
+                let engineError = EngineError.wrapping(error)
+                EngineLog.write("renderWorkingCopy \(source.lastPathComponent) failed: \(engineError.message)")
+                send(.failure(id: requestID, error: engineError))
+            }
+        }
+    }
+
     // MARK: - close / shutdown
 
     private func close(_ request: EngineRequest) throws {
@@ -510,6 +555,16 @@ final class EngineSession: @unchecked Sendable {
         guard let value else { return maximumPreviewDimension }
         guard value > 0 else { throw EngineError.invalidRequest("params.maxDimension は 1 以上にしてください") }
         return min(value, maximumPreviewDimension)
+    }
+
+    /// `renderWorkingCopy`'s `previewMaxDimension`: 1024 when left out,
+    /// otherwise 1...2560.
+    static func workingCopyPreviewDimension(_ value: Int?) throws -> Int {
+        guard let value else { return WorkingCopyRenderer.defaultPreviewMaxDimension }
+        guard (1...maximumPreviewDimension).contains(value) else {
+            throw EngineError.invalidRequest("params.previewMaxDimension は 1〜\(maximumPreviewDimension) にしてください")
+        }
+        return value
     }
 
     static func exportQuality(_ value: Double?) throws -> Double {

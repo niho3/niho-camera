@@ -454,7 +454,9 @@ public struct CoreImageRAWWhiteBalanceDecoder: Sendable {
         )
     }
 
-    private static func neutralValues(
+    /// Also reads `WorkingCopyRenderer`'s as-shot white (the same readback
+    /// and the same checks).
+    static func neutralValues(
         filter: CIRAWFilter,
         label: String
     ) throws -> RAWNeutralValues {

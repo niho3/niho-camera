@@ -62,6 +62,7 @@ BASE_REQUIRED_SOURCE_FILES = [
     "Sources/PhotoCore/Lens/PanasonicRW2Metadata.swift",
     "Sources/PhotoCore/Spatial/SpatialToneMetalSource.swift",
     "Sources/PhotoCore/Spatial/SpatialToneProcessor.swift",
+    "Sources/PhotoCore/WorkingCopyRenderer.swift",
     "Sources/PhotoBenchCalibrationSupport/BenchmarkModels.swift",
     "Sources/PhotoBenchCalibrationSupport/CalibrationManifest.swift",
     "Sources/PhotoBenchCalibrationSupport/CalibrationRun.swift",

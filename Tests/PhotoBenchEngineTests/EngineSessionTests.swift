@@ -25,7 +25,7 @@ struct EngineSessionTests {
         let hello = try harness.call("hello")
         #expect(hello.ok)
         #expect(hello.result?["protocolVersion"] as? Int == 1)
-        #expect((hello.result?["engineVersion"] as? String)?.hasPrefix("0.1.0+") == true)
+        #expect((hello.result?["engineVersion"] as? String)?.hasPrefix("0.2.0+") == true)
 
         let presets = try harness.call("builtinPresets")
         let list = try #require(presets.result?["presets"] as? [[String: Any]])
@@ -249,6 +249,129 @@ struct EngineSessionTests {
         #expect(exported.result?["path"] as? String == "/out/a.jpg")
         #expect(exported.result?["bytes"] as? Int == 1_234)
         #expect(try harness.sink.response(id: newerRender).ok)
+    }
+
+    // MARK: - renderWorkingCopy
+
+    private func workingCopyParams(
+        _ source: String = "/photos/P1.RW2",
+        preview: String? = "/out/P1.jpg",
+        maxDimension: Int? = nil,
+        previewMaxDimension: Int? = nil
+    ) -> [String: Any] {
+        var params: [String: Any] = ["path": source, "workingCopyPath": "/out/P1.png"]
+        if let preview { params["previewPath"] = preview }
+        if let maxDimension { params["maxDimension"] = maxDimension }
+        if let previewMaxDimension { params["previewMaxDimension"] = previewMaxDimension }
+        return params
+    }
+
+    @Test func renderWorkingCopyAnswersTheWorkingCopyAndItsMeta() throws {
+        let harness = SessionHarness()
+        let response = try harness.call("renderWorkingCopy", workingCopyParams())
+        #expect(response.ok, "\(response.header)")
+        #expect(response.binary == nil)
+        let result = try #require(response.result)
+        #expect(result["kind"] as? String == "raw")
+        #expect(result["baseVersion"] as? String == "raw-apple.d8.p1.e1.cal-none")
+        #expect(result["width"] as? Int == 2_560)
+        #expect(result["height"] as? Int == 1_706)
+        #expect(result["sourceWidth"] as? Int == 6_000)
+        #expect(result["sourceHeight"] as? Int == 4_000)
+        #expect(result["bytes"] as? Int == 4_321)
+        let preview = try #require(result["preview"] as? [String: Any])
+        #expect(preview["width"] as? Int == 1_024)
+        #expect(preview["height"] as? Int == 682)
+        #expect(preview["bytes"] as? Int == 321)
+        let meta = try #require(result["meta"] as? [String: Any])
+        #expect(meta["kind"] as? String == "raw")
+        #expect(meta["decoderVersion"] as? String == "8")
+        #expect(meta["lensCorrection"] is NSNull)
+        #expect((meta["asShotWhite"] as? [String: Any])?["temperature"] as? Int == 5_200)
+        let timings = try #require(result["timings"] as? [String: Any])
+        #expect(timings["decodeMs"] as? Int == 12)
+        #expect(timings["workingCopyMs"] as? Int == 34)
+        #expect(timings["previewMs"] as? Int == 5)
+
+        // Defaults: 2560 for the working copy, 1024 for the preview.
+        let call = try #require(harness.backend.workingCopies.last)
+        #expect(call.sourceURL.path == "/photos/P1.RW2")
+        #expect(call.workingCopyURL.path == "/out/P1.png")
+        #expect(call.previewURL?.path == "/out/P1.jpg")
+        #expect(call.maxDimension == 2_560)
+        #expect(call.previewMaxDimension == 1_024)
+
+        // Without `previewPath` (or with null) there is no preview, written as an explicit null.
+        let withoutPreview = try harness.call("renderWorkingCopy", workingCopyParams("/photos/a.heic", preview: nil))
+        let raster = try #require(withoutPreview.result)
+        #expect(raster["kind"] as? String == "raster")
+        #expect(raster["preview"] is NSNull)
+        let icc = try #require((raster["meta"] as? [String: Any])?["icc"] as? [String: Any])
+        #expect(icc["sha256"] is NSNull)
+        #expect(icc["description"] is NSNull)
+        #expect(harness.backend.workingCopies.last?.previewURL == nil)
+        var nullPreview = workingCopyParams(preview: nil)
+        nullPreview["previewPath"] = NSNull()
+        #expect(try harness.call("renderWorkingCopy", nullPreview).result?["preview"] is NSNull)
+    }
+
+    @Test func renderWorkingCopyValidatesItsParams() throws {
+        let harness = SessionHarness()
+        for (field, value) in [("path", "relative.RW2"), ("workingCopyPath", "out.png"), ("previewPath", "out.jpg")] {
+            var params = workingCopyParams()
+            params[field] = value
+            let response = try harness.call("renderWorkingCopy", params)
+            #expect(response.errorCode == "invalidRequest", "\(field)")
+            #expect(response.errorMessage?.contains("params.\(field)") == true, "\(field)")
+        }
+        #expect(try harness.call("renderWorkingCopy", ["path": "/photos/P1.RW2"]).errorCode == "invalidRequest")
+        #expect(try harness.call("renderWorkingCopy", workingCopyParams(maxDimension: 0)).errorCode == "invalidRequest")
+        for previewMaxDimension in [0, -5, 2_561] {
+            let response = try harness.call("renderWorkingCopy", workingCopyParams(previewMaxDimension: previewMaxDimension))
+            #expect(response.errorCode == "invalidRequest", "\(previewMaxDimension)")
+        }
+        #expect(harness.backend.workingCopies.isEmpty, "invalid requests never reach the backend")
+
+        // A larger maxDimension is treated as 2560 (as `render`); previewMaxDimension may be 1...2560.
+        #expect(try harness.call(
+            "renderWorkingCopy", workingCopyParams(maxDimension: 9_000, previewMaxDimension: 2_560)
+        ).ok)
+        #expect(try harness.call("renderWorkingCopy", workingCopyParams(maxDimension: 800, previewMaxDimension: 1)).ok)
+        #expect(harness.backend.workingCopies.map(\.maxDimension) == [2_560, 800])
+        #expect(harness.backend.workingCopies.map(\.previewMaxDimension) == [2_560, 1])
+    }
+
+    @Test func renderWorkingCopyErrorCodes() throws {
+        let harness = SessionHarness()
+        #expect(try harness.call("renderWorkingCopy", workingCopyParams("/photos/broken.RW2")).errorCode == "decodeFailed")
+        #expect(
+            try harness.call("renderWorkingCopy", workingCopyParams("/photos/unsupported-camera.RW2")).errorCode
+                == "unsupportedCamera"
+        )
+        let brokenProfile = try harness.call("renderWorkingCopy", workingCopyParams("/photos/broken-icc.jpg"))
+        #expect(brokenProfile.errorCode == "unsupportedProfile")
+        #expect(brokenProfile.errorMessage == "ICC が壊れています: broken-icc.jpg")
+        var unwritable = workingCopyParams()
+        unwritable["workingCopyPath"] = "/out/unwritable.png"
+        #expect(try harness.call("renderWorkingCopy", unwritable).errorCode == "exportFailed")
+    }
+
+    /// Serial with `open` / `render` / `export` (PhotoCore is used from one
+    /// queue), and the photos the caller has open are protected like the
+    /// original.
+    @Test func renderWorkingCopyRunsOnTheWorkQueueAndProtectsOpenPhotos() throws {
+        let harness = SessionHarness()
+        let photoID = try harness.open("a.jpg")
+        let gate = harness.holdQueue()
+        let job = harness.send("renderWorkingCopy", workingCopyParams())
+        let render = harness.send("render", renderParams(photoID))
+        Thread.sleep(forTimeInterval: 0.05)
+        #expect(!harness.sink.hasResponse(id: job))
+        #expect(!harness.sink.hasResponse(id: render))
+        gate.signal()
+        #expect(try harness.sink.response(id: job).ok)
+        #expect(try harness.sink.response(id: render).ok)
+        #expect(harness.backend.workingCopies.last?.protectedSourceURLs.map(\.path) == ["/photos/a.jpg"])
     }
 
     // MARK: - Drag sessions

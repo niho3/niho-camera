@@ -5,7 +5,7 @@
   "adoptionStatus": "exploratory-observation-only",
   "baseCalibrationManifest": {
     "path": "calibration/manifest-v4.json",
-    "sha256": "dd96ff34e9d607ece3f09d8126b6ba04204c1ddbff7f5728359003b9d93ffe39",
+    "sha256": "1d5a2204bce41b9c139b5a0c392cf7043ee4cc53127ff71828629eae182f8ae1",
     "suiteID": "dc-s5-lightroom-9.3-canonical-settle-2026-07-24-v4",
     "schemaVersion": 4
   },
@@ -51,6 +51,7 @@
       "Sources/PhotoCore/Lens/PanasonicRW2Metadata.swift",
       "Sources/PhotoCore/Spatial/SpatialToneMetalSource.swift",
       "Sources/PhotoCore/Spatial/SpatialToneProcessor.swift",
+      "Sources/PhotoCore/WorkingCopyRenderer.swift",
       "Sources/PhotoBenchCalibrationSupport/BenchmarkModels.swift",
       "Sources/PhotoBenchCalibrationSupport/CalibrationManifest.swift",
       "Sources/PhotoBenchCalibrationSupport/CalibrationRun.swift",

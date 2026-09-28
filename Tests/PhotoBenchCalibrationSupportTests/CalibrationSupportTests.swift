@@ -22,7 +22,7 @@ struct CalibrationSupportTests {
         #expect(loaded.manifest.schemaVersion == 4)
         #expect(loaded.manifest.scenes.count == 2)
         #expect(loaded.manifest.stageMatrix.count == 12)
-        #expect(loaded.manifest.processing.sourceFiles.count == 42)
+        #expect(loaded.manifest.processing.sourceFiles.count == 43)
         #expect(loaded.manifest.processing.fingerprint == .current)
         #expect(previewParity.maxDimension == nil)
         #expect(

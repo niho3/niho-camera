@@ -7,7 +7,8 @@ import MachO
 /// uncommitted tree) into the executable's `__TEXT,__pb_engine_ver` section
 /// (`-sectcreate`); a development build without it reports `+dev`.
 enum EngineVersion {
-    static let semanticVersion = "0.1.0"
+    /// 0.2.0: `renderWorkingCopy`. Adding a method keeps `protocolVersion`.
+    static let semanticVersion = "0.2.0"
     static let protocolVersion = 1
     static let segmentName = "__TEXT"
     static let sectionName = "__pb_engine_ver"

@@ -103,7 +103,7 @@ struct EngineProtocolTests {
     }
 
     @Test func successAndFailureHeadersFollowTheProtocol() throws {
-        let hello = try ParsedResponse(.success(id: 1, result: HelloResult(engineVersion: "0.1.0+dev", protocolVersion: 1)))
+        let hello = try ParsedResponse(.success(id: 1, result: HelloResult(engineVersion: "0.2.0+dev", protocolVersion: 1)))
         #expect(hello.id == 1)
         #expect(hello.ok)
         #expect(hello.result?["protocolVersion"] as? Int == 1)
@@ -154,6 +154,134 @@ struct EngineProtocolTests {
         let response = EngineResponse.success(id: 1, result: ExportResult(path: "/Users/写真/a.jpg", width: 1, height: 1, bytes: 1))
         let text = String(decoding: response.header, as: UTF8.self)
         #expect(text.contains(#""path":"/Users/写真/a.jpg""#))
+    }
+
+    // MARK: - renderWorkingCopy
+
+    @Test func renderWorkingCopyParamsDecodeWithTheirOptionalFields() throws {
+        let full = try RequestParser.parse(Data(#"""
+        {"id": 1, "method": "renderWorkingCopy", "params": {"path": "/a.RW2", "workingCopyPath": "/w/a.png",
+         "previewPath": "/w/a.jpg", "maxDimension": 2048, "previewMaxDimension": 512}}
+        """#.utf8)).get().decodeParams(RenderWorkingCopyParams.self)
+        #expect(full.path == "/a.RW2")
+        #expect(full.workingCopyPath == "/w/a.png")
+        #expect(full.previewPath == "/w/a.jpg")
+        #expect(full.maxDimension == 2_048)
+        #expect(full.previewMaxDimension == 512)
+
+        let minimal = try RequestParser.parse(Data(
+            #"{"id": 2, "method": "renderWorkingCopy", "params": {"path": "/a.jpg", "workingCopyPath": "/w/a.png", "previewPath": null}}"#.utf8
+        )).get().decodeParams(RenderWorkingCopyParams.self)
+        #expect(minimal.previewPath == nil)
+        #expect(minimal.maxDimension == nil)
+        #expect(minimal.previewMaxDimension == nil)
+
+        let missing = try RequestParser.parse(Data(
+            #"{"id": 3, "method": "renderWorkingCopy", "params": {"path": "/a.jpg"}}"#.utf8
+        )).get()
+        #expect(throws: EngineError.invalidRequest("params.workingCopyPath がありません")) {
+            try missing.decodeParams(RenderWorkingCopyParams.self)
+        }
+    }
+
+    @Test func renderWorkingCopyResultsWriteTheMetaUnionAndExplicitNulls() throws {
+        let raw = WorkingCopyResult(
+            kind: .raw, baseVersion: "raw-apple.d8.p1.e1.cal-none",
+            width: 2_560, height: 1_707, sourceWidth: 6_000, sourceHeight: 4_000, bytes: 14_567_890,
+            preview: nil,
+            meta: .raw(.init(
+                engine: "apple-raw", decoderVersion: "8", baselineEV: 0, calibration: "none",
+                asShotWhite: .init(x: 0.3457, y: 0.3585, temperature: 5_200, tint: 3),
+                orientationApplied: true, lensCorrection: nil,
+                noiseReduction: .init(luminance: 0.77, color: 0.5), sharpness: 0.9,
+                encoding: .png16, colorSpace: "linear-prophoto-d50", sourceExtension: "rw2"
+            )),
+            timings: .init(decodeMilliseconds: 1_200, workingCopyMilliseconds: 800, previewMilliseconds: 0)
+        )
+        let object = try #require(try ParsedResponse(.success(id: 1, result: RenderWorkingCopyResult(raw))).result)
+        #expect(Set(object.keys) == [
+            "kind", "baseVersion", "width", "height", "sourceWidth", "sourceHeight", "bytes", "preview", "meta", "timings"
+        ])
+        #expect(object["kind"] as? String == "raw")
+        #expect(object["baseVersion"] as? String == "raw-apple.d8.p1.e1.cal-none")
+        #expect(object["bytes"] as? Int == 14_567_890)
+        #expect(object["preview"] is NSNull)
+        let timings = try #require(object["timings"] as? [String: Int])
+        #expect(timings == ["decodeMs": 1_200, "workingCopyMs": 800, "previewMs": 0])
+        let meta = try #require(object["meta"] as? [String: Any])
+        #expect(Set(meta.keys) == [
+            "kind", "engine", "decoderVersion", "baselineEV", "calibration", "asShotWhite", "orientationApplied",
+            "lensCorrection", "noiseReduction", "sharpness", "encoding", "colorSpace", "sourceExtension"
+        ])
+        #expect(meta["kind"] as? String == "raw")
+        #expect(meta["engine"] as? String == "apple-raw")
+        #expect(meta["decoderVersion"] as? String == "8")
+        #expect(meta["baselineEV"] as? Double == 0)
+        #expect(meta["calibration"] as? String == "none")
+        #expect(meta["lensCorrection"] is NSNull)
+        #expect(meta["orientationApplied"] as? Bool == true)
+        #expect(meta["sharpness"] as? Double == 0.9)
+        let white = try #require(meta["asShotWhite"] as? [String: Any])
+        #expect(white["x"] as? Double == 0.3457)
+        #expect(white["y"] as? Double == 0.3585)
+        #expect(white["temperature"] as? Int == 5_200)
+        #expect(white["tint"] as? Int == 3)
+        let noise = try #require(meta["noiseReduction"] as? [String: Any])
+        #expect(noise["luminance"] as? Double == 0.77)
+        #expect(noise["color"] as? Double == 0.5)
+        let encoding = try #require(meta["encoding"] as? [String: Any])
+        #expect(encoding["format"] as? String == "png16")
+        #expect(encoding["gamma"] as? Double == 1.8)
+        #expect(encoding["ceiling"] as? Double == 2)
+        #expect(meta["colorSpace"] as? String == "linear-prophoto-d50")
+        #expect(meta["sourceExtension"] as? String == "rw2")
+
+        let rasterMeta: (WorkingCopyMeta.ICC) -> WorkingCopyMeta = { icc in
+            .raster(.init(
+                cms: "ci1", icc: icc, orientationApplied: true, encoding: .png16,
+                colorSpace: "linear-prophoto-d50", sourceExtension: "heic"
+            ))
+        }
+        let sha = String(repeating: "ab", count: 32)
+        let raster = WorkingCopyResult(
+            kind: .raster, baseVersion: "raster.ci1.p1.e1.icc-\(sha)",
+            width: 2_560, height: 1_920, sourceWidth: 4_032, sourceHeight: 3_024, bytes: 12_000_000,
+            preview: .init(width: 1_024, height: 768, bytes: 234_567),
+            meta: rasterMeta(.init(sha256: sha, description: "Display P3")),
+            timings: .init(decodeMilliseconds: 300, workingCopyMilliseconds: 700, previewMilliseconds: 90)
+        )
+        let rasterObject = try #require(try ParsedResponse(.success(id: 2, result: RenderWorkingCopyResult(raster))).result)
+        #expect((rasterObject["preview"] as? [String: Int]) == ["width": 1_024, "height": 768, "bytes": 234_567])
+        let rasterMetaObject = try #require(rasterObject["meta"] as? [String: Any])
+        #expect(Set(rasterMetaObject.keys) == [
+            "kind", "cms", "icc", "orientationApplied", "encoding", "colorSpace", "sourceExtension"
+        ])
+        #expect(rasterMetaObject["kind"] as? String == "raster")
+        #expect(rasterMetaObject["cms"] as? String == "ci1")
+        #expect((rasterMetaObject["icc"] as? [String: String]) == ["sha256": sha, "description": "Display P3"])
+
+        // An image without an ICC profile: both written as explicit nulls.
+        let untagged = WorkingCopyResult(
+            kind: .raster, baseVersion: "raster.ci1.p1.e1.icc-srgb",
+            width: 96, height: 64, sourceWidth: 96, sourceHeight: 64, bytes: 1_000, preview: nil,
+            meta: rasterMeta(.assumedSRGB),
+            timings: .init(decodeMilliseconds: 1, workingCopyMilliseconds: 1, previewMilliseconds: 0)
+        )
+        let untaggedObject = try #require(try ParsedResponse(.success(id: 3, result: RenderWorkingCopyResult(untagged))).result)
+        let icc = try #require((untaggedObject["meta"] as? [String: Any])?["icc"] as? [String: Any])
+        #expect(icc["sha256"] is NSNull)
+        #expect(icc["description"] is NSNull)
+    }
+
+    @Test func workingCopyErrorsKeepTheirProtocolCode() {
+        for code in [
+            WorkingCopyError.Code.invalidRequest, .decodeFailed, .unsupportedCamera, .unsupportedProfile,
+            .exportFailed, .internal
+        ] {
+            let wrapped = EngineError.wrapping(WorkingCopyError(code, "理由"))
+            #expect(wrapped.code.rawValue == code.rawValue)
+            #expect(wrapped.message == "理由")
+        }
     }
 
     // MARK: - Writer

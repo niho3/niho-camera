@@ -13,6 +13,11 @@ struct EngineError: Error, Equatable, Sendable {
         case notFound
         case cancelled
         case decodeFailed
+        /// `renderWorkingCopy`: macOS's RAW 8 decoder (`8.dng` for a DNG)
+        /// does not support the camera.
+        case unsupportedCamera
+        /// `renderWorkingCopy`: the embedded ICC profile is broken.
+        case unsupportedProfile
         case presetInvalid
         case exportFailed
         case `internal`
@@ -35,10 +40,14 @@ struct EngineError: Error, Equatable, Sendable {
     static let cancelled = EngineError(.cancelled, "同じ写真へのより新しい render が来たので取り消しました")
 
     /// Any error from outside the engine, as the protocol's `internal`
-    /// (an `EngineError` keeps its own code).
+    /// (an `EngineError` keeps its own code, a `WorkingCopyError` its
+    /// protocol code).
     static func wrapping(_ error: Error) -> EngineError {
         if let engineError = error as? EngineError { return engineError }
         if error is CancellationError { return .cancelled }
+        if let workingCopyError = error as? WorkingCopyError {
+            return EngineError(Code(rawValue: workingCopyError.code.rawValue) ?? .internal, workingCopyError.message)
+        }
         return EngineError(.internal, describe(error))
     }
 }
@@ -59,6 +68,7 @@ enum EngineMethod: String, Sendable, CaseIterable {
     case open
     case render
     case export
+    case renderWorkingCopy
     case close
     case shutdown
 }
@@ -174,6 +184,14 @@ struct ExportParams: Decodable, Sendable {
     let settings: EditSettings
     let destinationPath: String
     let jpegQuality: Double?
+}
+
+struct RenderWorkingCopyParams: Decodable, Sendable {
+    let path: String
+    let workingCopyPath: String
+    let previewPath: String?
+    let maxDimension: Int?
+    let previewMaxDimension: Int?
 }
 
 struct CloseParams: Decodable, Sendable {
@@ -292,6 +310,168 @@ struct ExportResult: Encodable, Sendable {
     let width: Int
     let height: Int
     let bytes: Int
+}
+
+/// `renderWorkingCopy`'s result. `preview`, `meta.lensCorrection` and
+/// `meta.icc.sha256` / `meta.icc.description` are written as explicit
+/// `null` (documented as `... | null`), not left out.
+struct RenderWorkingCopyResult: Encodable, Sendable {
+    let rendered: WorkingCopyResult
+
+    init(_ rendered: WorkingCopyResult) {
+        self.rendered = rendered
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, baseVersion, width, height, sourceWidth, sourceHeight, bytes, preview, meta, timings
+    }
+
+    private struct PreviewBody: Encodable {
+        let width: Int
+        let height: Int
+        let bytes: Int
+    }
+
+    private struct TimingsBody: Encodable {
+        let decodeMs: Int
+        let workingCopyMs: Int
+        let previewMs: Int
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(rendered.kind.rawValue, forKey: .kind)
+        try container.encode(rendered.baseVersion, forKey: .baseVersion)
+        try container.encode(rendered.width, forKey: .width)
+        try container.encode(rendered.height, forKey: .height)
+        try container.encode(rendered.sourceWidth, forKey: .sourceWidth)
+        try container.encode(rendered.sourceHeight, forKey: .sourceHeight)
+        try container.encode(rendered.bytes, forKey: .bytes)
+        if let preview = rendered.preview {
+            try container.encode(
+                PreviewBody(width: preview.width, height: preview.height, bytes: preview.bytes),
+                forKey: .preview
+            )
+        } else {
+            try container.encodeNil(forKey: .preview)
+        }
+        try container.encode(WorkingCopyMetaBody(rendered.meta), forKey: .meta)
+        let timings = rendered.timings
+        try container.encode(
+            TimingsBody(
+                decodeMs: timings.decodeMilliseconds,
+                workingCopyMs: timings.workingCopyMilliseconds,
+                previewMs: timings.previewMilliseconds
+            ),
+            forKey: .timings
+        )
+    }
+}
+
+/// `renderWorkingCopy`'s `meta`: one object per source kind, told apart by
+/// its `kind` (`raw` / `raster`).
+private struct WorkingCopyMetaBody: Encodable {
+    let meta: WorkingCopyMeta
+
+    init(_ meta: WorkingCopyMeta) {
+        self.meta = meta
+    }
+
+    private enum RAWKeys: String, CodingKey {
+        case kind, engine, decoderVersion, baselineEV, calibration, asShotWhite, orientationApplied
+        case lensCorrection, noiseReduction, sharpness, encoding, colorSpace, sourceExtension
+    }
+
+    private enum RasterKeys: String, CodingKey {
+        case kind, cms, icc, orientationApplied, encoding, colorSpace, sourceExtension
+    }
+
+    private struct AsShotWhiteBody: Encodable {
+        let x: Double
+        let y: Double
+        let temperature: Int
+        let tint: Int
+    }
+
+    private struct NoiseReductionBody: Encodable {
+        let luminance: Double
+        let color: Double
+    }
+
+    private struct EncodingBody: Encodable {
+        let format: String
+        let gamma: Double
+        let ceiling: Double
+
+        init(_ encoding: WorkingCopyMeta.Encoding) {
+            format = encoding.format
+            gamma = encoding.gamma
+            ceiling = encoding.ceiling
+        }
+    }
+
+    private struct ICCBody: Encodable {
+        let icc: WorkingCopyMeta.ICC
+
+        private enum CodingKeys: String, CodingKey {
+            case sha256
+            case profileDescription = "description"
+        }
+
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            if let sha256 = icc.sha256 {
+                try container.encode(sha256, forKey: .sha256)
+            } else {
+                try container.encodeNil(forKey: .sha256)
+            }
+            if let description = icc.description {
+                try container.encode(description, forKey: .profileDescription)
+            } else {
+                try container.encodeNil(forKey: .profileDescription)
+            }
+        }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        switch meta {
+        case let .raw(raw):
+            var container = encoder.container(keyedBy: RAWKeys.self)
+            try container.encode("raw", forKey: .kind)
+            try container.encode(raw.engine, forKey: .engine)
+            try container.encode(raw.decoderVersion, forKey: .decoderVersion)
+            try container.encode(raw.baselineEV, forKey: .baselineEV)
+            try container.encode(raw.calibration, forKey: .calibration)
+            let white = raw.asShotWhite
+            try container.encode(
+                AsShotWhiteBody(x: white.x, y: white.y, temperature: white.temperature, tint: white.tint),
+                forKey: .asShotWhite
+            )
+            try container.encode(raw.orientationApplied, forKey: .orientationApplied)
+            if let lensCorrection = raw.lensCorrection {
+                try container.encode(lensCorrection, forKey: .lensCorrection)
+            } else {
+                try container.encodeNil(forKey: .lensCorrection)
+            }
+            try container.encode(
+                NoiseReductionBody(luminance: raw.noiseReduction.luminance, color: raw.noiseReduction.color),
+                forKey: .noiseReduction
+            )
+            try container.encode(raw.sharpness, forKey: .sharpness)
+            try container.encode(EncodingBody(raw.encoding), forKey: .encoding)
+            try container.encode(raw.colorSpace, forKey: .colorSpace)
+            try container.encode(raw.sourceExtension, forKey: .sourceExtension)
+        case let .raster(raster):
+            var container = encoder.container(keyedBy: RasterKeys.self)
+            try container.encode("raster", forKey: .kind)
+            try container.encode(raster.cms, forKey: .cms)
+            try container.encode(ICCBody(icc: raster.icc), forKey: .icc)
+            try container.encode(raster.orientationApplied, forKey: .orientationApplied)
+            try container.encode(EncodingBody(raster.encoding), forKey: .encoding)
+            try container.encode(raster.colorSpace, forKey: .colorSpace)
+            try container.encode(raster.sourceExtension, forKey: .sourceExtension)
+        }
+    }
 }
 
 // MARK: - Responses

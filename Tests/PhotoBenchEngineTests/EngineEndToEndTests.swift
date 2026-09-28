@@ -24,7 +24,7 @@ struct EngineEndToEndTests {
         let hello = try engine.call(1, "hello")
         #expect(hello.ok, "\(engine.log)")
         #expect(hello.result?["protocolVersion"] as? Int == 1)
-        #expect((hello.result?["engineVersion"] as? String)?.hasPrefix("0.1.0+") == true)
+        #expect((hello.result?["engineVersion"] as? String)?.hasPrefix("0.2.0+") == true)
 
         // Which Adobe install is found depends on the Mac; only the shape is fixed.
         let status = try engine.call(100, "profileStatus")
@@ -114,6 +114,65 @@ struct EngineEndToEndTests {
         #expect(try engine.call(15, "shutdown").ok)
         #expect(try engine.waitForExit(timeout: 30) == 0)
         #expect(engine.log.contains("photobench-engine: "))
+    }
+
+    /// One working copy of a JPEG the test writes, over the child process:
+    /// the PNG and the preview land where asked, with the reported sizes.
+    @Test func renderWorkingCopyWritesTheWorkingCopyAndThePreview() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("gradient.jpg")
+        try writeSyntheticJPEG(to: source, width: 96, height: 64)
+        let engine = try EngineProcess(binary: Self.engineBinary(), logDirectory: directory)
+        defer { engine.stop() }
+
+        let workingCopy = directory.appendingPathComponent("work/gradient.png")
+        let preview = directory.appendingPathComponent("work/gradient-preview.jpg")
+        let response = try engine.call(1, "renderWorkingCopy", [
+            "path": source.path,
+            "workingCopyPath": workingCopy.path,
+            "previewPath": preview.path,
+            "previewMaxDimension": 48
+        ])
+        #expect(response.ok, "\(response.header) \(engine.log)")
+        let result = try #require(response.result)
+        #expect(result["kind"] as? String == "raster")
+        let baseVersion = try #require(result["baseVersion"] as? String)
+        #expect(baseVersion.hasPrefix("raster.ci1.p1.e1.icc-"))
+        #expect(result["width"] as? Int == 96)
+        #expect(result["height"] as? Int == 64)
+        #expect(result["sourceWidth"] as? Int == 96)
+        #expect(result["sourceHeight"] as? Int == 64)
+        #expect(result["bytes"] as? Int == (try Data(contentsOf: workingCopy)).count)
+        let written = try #require(result["preview"] as? [String: Any])
+        #expect(written["width"] as? Int == 48)
+        #expect(written["height"] as? Int == 32)
+        let jpeg = try Data(contentsOf: preview)
+        #expect(written["bytes"] as? Int == jpeg.count)
+        #expect(Self.pixelSize(of: jpeg) == [48, 32])
+        #expect((try Data(contentsOf: workingCopy)).starts(with: [0x89, 0x50, 0x4E, 0x47]))
+        let meta = try #require(result["meta"] as? [String: Any])
+        #expect(meta["kind"] as? String == "raster")
+        #expect(meta["sourceExtension"] as? String == "jpg")
+        let timings = try #require(result["timings"] as? [String: Any])
+        #expect(timings["decodeMs"] is Int)
+        #expect(timings["workingCopyMs"] is Int)
+        #expect(timings["previewMs"] is Int)
+        #expect(engine.log.contains("renderWorkingCopy gradient.jpg 96x64 raster \(baseVersion) "))
+
+        // The original is never a destination; paths must be absolute.
+        let overwrite = try engine.call(2, "renderWorkingCopy", ["path": source.path, "workingCopyPath": source.path])
+        #expect(overwrite.errorCode == "exportFailed")
+        let relative = try engine.call(3, "renderWorkingCopy", ["path": source.path, "workingCopyPath": "work.png"])
+        #expect(relative.errorCode == "invalidRequest")
+        let missing = try engine.call(4, "renderWorkingCopy", [
+            "path": directory.appendingPathComponent("missing.RW2").path,
+            "workingCopyPath": directory.appendingPathComponent("work/missing.png").path
+        ])
+        #expect(missing.errorCode == "decodeFailed")
+
+        #expect(try engine.call(5, "shutdown").ok)
+        #expect(try engine.waitForExit(timeout: 30) == 0)
     }
 
     @Test func closingStandardInputEndsTheEngine() throws {

@@ -80,10 +80,10 @@ struct ExportedJPEG: Sendable {
     let bytes: Int
 }
 
-/// The image work behind `open`, `render` and `export`. `EngineSession`
-/// calls it from one serial queue only, as Photo Bench's `RenderCoordinator`
-/// actor does. Errors are `EngineError`s, or `CancellationError` from a
-/// cancelled render.
+/// The image work behind `open`, `render`, `export` and `renderWorkingCopy`.
+/// `EngineSession` calls it from one serial queue only, as Photo Bench's
+/// `RenderCoordinator` actor does. Errors are `EngineError`s, or
+/// `CancellationError` from a cancelled render.
 protocol EngineBackend: AnyObject, Sendable {
     func open(url: URL) throws -> OpenedPhoto
     func render(
@@ -100,6 +100,7 @@ protocol EngineBackend: AnyObject, Sendable {
         quality: Double,
         protectedSources: [URL]
     ) throws -> ExportedJPEG
+    func renderWorkingCopy(_ request: WorkingCopyRequest) throws -> WorkingCopyResult
 }
 
 /// PhotoCore, used exactly as the Photo Bench app does: `PhotoDecoder` ->
@@ -107,6 +108,8 @@ protocol EngineBackend: AnyObject, Sendable {
 /// from the working copy (`preparePreviewFromWorkingCopy`, `.interactive`)
 /// through the app's bitmap route (`materializePreview`, sRGB), and export
 /// from a fresh full-resolution decode (`exportJPEG`, `.final`).
+/// `renderWorkingCopy` is `WorkingCopyRenderer` alone: macOS's decoding,
+/// never `PhotoDecoder`'s Adobe profile route.
 final class PhotoCoreBackend: EngineBackend, @unchecked Sendable {
     /// Preview JPEG quality (export uses the request's `jpegQuality`).
     static let previewJPEGQuality = 0.85
@@ -115,6 +118,8 @@ final class PhotoCoreBackend: EngineBackend, @unchecked Sendable {
     /// Created on first use (its Metal contexts take a moment), so `hello`
     /// answers at once. Only touched from the session's serial work queue.
     private lazy var renderEngine = RenderEngine()
+    /// Created on first use, like `renderEngine`.
+    private lazy var workingCopyRenderer = WorkingCopyRenderer()
 
     func open(url: URL) throws -> OpenedPhoto {
         try autoreleasepool {
@@ -201,6 +206,17 @@ final class PhotoCoreBackend: EngineBackend, @unchecked Sendable {
                 height: written?.height ?? Int(extent.height),
                 bytes: bytes
             )
+        }
+    }
+
+    func renderWorkingCopy(_ request: WorkingCopyRequest) throws -> WorkingCopyResult {
+        try autoreleasepool {
+            do {
+                return try workingCopyRenderer.render(request)
+            } catch {
+                // `WorkingCopyError` codes are the protocol's own.
+                throw EngineError.wrapping(error)
+            }
         }
     }
 }

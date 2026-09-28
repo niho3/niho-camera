@@ -1,6 +1,6 @@
 # Photo Bench 進捗・目標・次の作業
 
-更新日: 2026-09-24 JST
+更新日: 2026-09-28 JST
 
 ## 現在の目標
 
@@ -52,6 +52,7 @@
 - **2026-09-24 朝: 強い Whites / Blacks で彩度が落ちる問題と Vibrance の強さを修正（ToneOps v2 / v3、ColorOps v3）。** round5 の LR 書き出し同士の比較で、LR は Whites を下げる・Blacks を上げるときに彩度を保つと分かった。輝度だけを動かす式と従来の RGBTone を混ぜた（v2）。続けて、Whites を下げるときの明部の彩度（v3）と、実写で 2 倍近く強かった Vibrance を直した。round5 の平均 ΔE00 は RAW 2.70 → 2.55、LR 由来 JPEG 3.05 → 2.53、カメラ JPEG 1.51 → 1.37、round3 1.93 → 1.82（[ENGINE_ROADMAP.md](ENGINE_ROADMAP.md) の round5 節）。
 - **2026-09-24 昼: 編集機能はここで一区切り（オーナー指示）。** 以後は NIHO Desktop への統合を進める。残っている画質の差（full_pastel のわずかな悪化、カメラ JPEG の Shadows / Highlights の彩度、LR 由来 JPEG の night の暗さ、P1581215 の基準現像）とトーン系の離した後の 0.3 秒は、統合の後に必要なら戻る。
 - **スライダーのドラッグを高速化（2026-09-24）。** mini の 1 更新（入力からビットマップまで）が全 19 スライダーで中央値 81ms 以下になった（変更前は最大 1160ms、トーン系 400〜830ms、色系 430〜1160ms）。主因は空間処理ではなく 64³ キューブの CPU 焼きだった（色系は `settings.hsl` の参照カウントを 10 コアで取り合っていた、トーン系は点カーブのスプラインを格子点ごとに作り直していた）。焼きを直したうえで、ドラッグ中は H/S の画像統計を固定して空間処理の結果を使い回し、トーン系の cube は 33³ で近似する。離したら正確な 1 枚に静かに差し替える（変更前と同じ画）。書き出しは Studio で約 2 倍速くなり（原寸 1.9〜2.05 秒 → 0.82〜0.85 秒）、出力はバイト一致。計測は `PHOTO_BENCH_PREVIEW_DIAG=1`（段ごとの ms を stderr）と `photobench-preview-bench`。あわせて、同じ機種・同じ固定 WB で撮った別の写真どうしで H/S の画像統計を取り違えていた不具合を直した（書き出しにも影響していた）。
+- **2026-09-28: エンジン 0.2.0 に `renderWorkingCopy` を足した（NIHO の現像エンジンの段 1、niho-coliving/niho-app#16943）。** RAW・JPEG・PNG・HEIC・TIFF を、Adobe のカメラプロファイルと LibRaw を使わず macOS の現像（Core Image。RAW は RAW 8 の線形出力）だけで、linear ProPhoto・長辺 2560px・16bit PNG（gamma 1.8・上限 2.0）の作業コピーと 1MiB 以下のプレビュー JPEG にする（`Sources/PhotoCore/WorkingCopyRenderer.swift`、[ENGINE_PROTOCOL.md](ENGINE_PROTOCOL.md)）。Studio の release で P1524180.RW2 が 1 枚 1.2〜1.5 秒（PNG 19.6MB、プレビュー 228KB。新しいビルドの最初の 1 回だけ約 6 秒）、6000×4000 の合成 HEIC が 0.9〜1.0 秒。どちらも半分以上は 16bit PNG の符号化。機種別補正（S9a）の差し込み口は `WorkingCopyCalibration`（今は恒等で `cal-none`）。
 
 根拠・方式比較・出典は[ENGINE_ROADMAP.md](ENGINE_ROADMAP.md)。過去の調査は[汎用XMPエンジン設計](GENERIC_XMP_ENGINE.md)、[エンジン比較・根拠](ENGINE_RESEARCH.md)。
 

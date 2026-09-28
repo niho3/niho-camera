@@ -101,6 +101,7 @@ final class FakeBackend: EngineBackend, @unchecked Sendable {
     private var opens: [String: Int] = [:]
     private var renderCalls: [RenderCall] = []
     private var exportCalls: [URL] = []
+    private var workingCopyCalls: [WorkingCopyRequest] = []
     private var blockedRenders: Set<Int> = []
     private var blocksExports = false
     let renderGate = DispatchSemaphore(value: 0)
@@ -139,6 +140,12 @@ final class FakeBackend: EngineBackend, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return exportCalls
+    }
+
+    var workingCopies: [WorkingCopyRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return workingCopyCalls
     }
 
     func open(url: URL) throws -> OpenedPhoto {
@@ -216,6 +223,62 @@ final class FakeBackend: EngineBackend, @unchecked Sendable {
             throw EngineError(.exportFailed, "書き出せません: \(destination.lastPathComponent)")
         }
         return ExportedJPEG(path: destination.path, width: 6_000, height: 4_000, bytes: 1_234)
+    }
+
+    /// A fixed 6000x4000 result: `.RW2` is a RAW without lens correction,
+    /// anything else a raster without an ICC profile. Sources named
+    /// `broken-icc*`, `broken*` and `unsupported-camera*`, and working copy
+    /// paths named `unwritable*`, fail with the matching code.
+    func renderWorkingCopy(_ request: WorkingCopyRequest) throws -> WorkingCopyResult {
+        lock.lock()
+        workingCopyCalls.append(request)
+        lock.unlock()
+        let name = request.sourceURL.lastPathComponent
+        if name.hasPrefix("broken-icc") {
+            throw WorkingCopyError(.unsupportedProfile, "ICC が壊れています: \(name)")
+        }
+        if name.hasPrefix("broken") {
+            throw WorkingCopyError(.decodeFailed, "写真を読めません: \(name)")
+        }
+        if name.hasPrefix("unsupported-camera") {
+            throw WorkingCopyError(.unsupportedCamera, "この機種に対応していません: \(name)")
+        }
+        if request.workingCopyURL.lastPathComponent.hasPrefix("unwritable") {
+            throw WorkingCopyError(.exportFailed, "書き出せません: \(request.workingCopyURL.lastPathComponent)")
+        }
+        let isRAW = request.sourceURL.pathExtension == "RW2"
+        let meta: WorkingCopyMeta = isRAW
+            ? .raw(.init(
+                engine: "apple-raw", decoderVersion: "8", baselineEV: 0, calibration: "none",
+                asShotWhite: .init(x: 0.3457, y: 0.3585, temperature: 5_200, tint: 3),
+                orientationApplied: true, lensCorrection: nil,
+                noiseReduction: .init(luminance: 0.77, color: 0.5), sharpness: 0.9,
+                encoding: .png16, colorSpace: "linear-prophoto-d50", sourceExtension: "rw2"
+            ))
+            : .raster(.init(
+                cms: "ci1", icc: .assumedSRGB, orientationApplied: true, encoding: .png16,
+                colorSpace: "linear-prophoto-d50", sourceExtension: request.sourceURL.pathExtension.lowercased()
+            ))
+        let longEdge = min(request.maxDimension, 6_000)
+        let previewLongEdge = min(request.previewMaxDimension, 6_000)
+        return WorkingCopyResult(
+            kind: isRAW ? .raw : .raster,
+            baseVersion: isRAW ? "raw-apple.d8.p1.e1.cal-none" : "raster.ci1.p1.e1.icc-srgb",
+            width: longEdge,
+            height: longEdge * 2 / 3,
+            sourceWidth: 6_000,
+            sourceHeight: 4_000,
+            bytes: 4_321,
+            preview: request.previewURL.map { _ in
+                .init(width: previewLongEdge, height: previewLongEdge * 2 / 3, bytes: 321)
+            },
+            meta: meta,
+            timings: .init(
+                decodeMilliseconds: 12,
+                workingCopyMilliseconds: 34,
+                previewMilliseconds: request.previewURL == nil ? 0 : 5
+            )
+        )
     }
 }
 

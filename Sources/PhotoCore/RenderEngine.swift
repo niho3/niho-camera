@@ -421,6 +421,29 @@ struct PreviewWorkingRaster {
     /// color space (non-RAW: `passthroughColorSpace`) keeps them converted
     /// correctly by any context. `nil` when the image has no usable extent.
     func materialize(_ image: CIImage, taggedAs colorSpace: CGColorSpace?) -> CIImage? {
+        guard let rendered = renderPixels(image) else { return nil }
+        return CIImage(
+            bitmapData: rendered.data,
+            bytesPerRow: rendered.rowBytes,
+            size: CGSize(width: rendered.width, height: rendered.height),
+            format: .RGBAf,
+            colorSpace: colorSpace
+        )
+    }
+
+    /// RGBA float pixels (premultiplied, rows top to bottom) of one
+    /// `renderPixels` call, in `passthroughColorSpace`'s numbers.
+    struct RenderedPixels: @unchecked Sendable {
+        let data: Data
+        let width: Int
+        let height: Int
+        let rowBytes: Int
+    }
+
+    /// `materialize`'s one-time render, returning the bitmap itself
+    /// (`WorkingCopyRenderer` encodes it instead of wrapping it). `nil` when
+    /// the image has no usable extent.
+    func renderPixels(_ image: CIImage) -> RenderedPixels? {
         let bounds = image.extent.integral
         guard bounds.origin == .zero,
               let width = CoreImageDecoder.validatedPixelDimension(bounds.width),
@@ -439,13 +462,11 @@ struct PreviewWorkingRaster {
             format: .RGBAf,
             colorSpace: Self.passthroughColorSpace
         )
-        let data = Data(bytesNoCopy: pixels, count: byteCount, deallocator: .free)
-        return CIImage(
-            bitmapData: data,
-            bytesPerRow: rowBytes,
-            size: CGSize(width: width, height: height),
-            format: .RGBAf,
-            colorSpace: colorSpace
+        return RenderedPixels(
+            data: Data(bytesNoCopy: pixels, count: byteCount, deallocator: .free),
+            width: width,
+            height: height,
+            rowBytes: rowBytes
         )
     }
 }
