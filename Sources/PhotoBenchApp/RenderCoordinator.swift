@@ -1,8 +1,11 @@
 import Foundation
+import NihoCameraCutout
 import PhotoCore
 
 actor RenderCoordinator {
     private let renderer = RenderEngine()
+    private let detector = CutoutDetector()
+    private let composer = CutoutComposer()
 
     func prepareProductionPreview(
         decoded: DecodedPhoto,
@@ -77,6 +80,49 @@ actor RenderCoordinator {
         return try autoreleasepool { try renderer.materializePreview(frame) }
     }
 
+    func materializeCutoutPreview(
+        _ frame: PreparedPreviewFrame,
+        recipe: BackgroundEditRecipe,
+        maskPNGData: Data
+    ) throws -> RenderedPreview {
+        try Task.checkCancellation()
+        let started = ContinuousClock.now
+        let image = try composer.compose(
+            image: frame.image,
+            maskPNGData: maskPNGData,
+            background: recipe.background,
+            brushStrokes: recipe.brushStrokes
+        )
+        let composed = PreparedPreviewFrame(
+            image: image,
+            extent: frame.extent,
+            sourceURL: frame.sourceURL,
+            graphAndKernelSetupMilliseconds: frame.graphAndKernelSetupMilliseconds,
+            maxDimension: frame.maxDimension
+        )
+        let rendered = try renderer.materializePreview(composed)
+        let components = started.duration(to: .now).components
+        let elapsed = Double(components.seconds) * 1_000
+            + Double(components.attoseconds) / 1_000_000_000_000_000
+        return RenderedPreview(
+            image: rendered.image,
+            durationMilliseconds: elapsed
+        )
+    }
+
+    func detectCutout(
+        decoded: DecodedPhoto,
+        inputSHA256: String
+    ) async throws -> CutoutDetectionResult {
+        try Task.checkCancellation()
+        let image = try renderer.prepareFullResolutionOutput(
+            decoded: decoded,
+            settings: .neutral
+        )
+        try Task.checkCancellation()
+        return try await detector.detect(ciImage: image, inputSHA256: inputSHA256)
+    }
+
     func renderPreview(
         decoded: DecodedPhoto,
         settings: EditSettings,
@@ -101,6 +147,32 @@ actor RenderCoordinator {
             decoded: decoded,
             settings: settings,
             destination: destination,
+            protectedSourceURLs: protectedSourceURLs
+        )
+    }
+
+    func exportCutout(
+        decoded: DecodedPhoto,
+        settings: EditSettings,
+        recipe: BackgroundEditRecipe,
+        maskPNGData: Data,
+        destination: URL,
+        format: CutoutOutputFormat,
+        protectedSourceURLs: [URL]
+    ) throws -> CGSize {
+        try Task.checkCancellation()
+        let image = try renderer.prepareFullResolutionOutput(
+            decoded: decoded,
+            settings: settings
+        )
+        try Task.checkCancellation()
+        return try composer.export(
+            image: image,
+            maskPNGData: maskPNGData,
+            background: recipe.background,
+            brushStrokes: recipe.brushStrokes,
+            destination: destination,
+            format: format,
             protectedSourceURLs: protectedSourceURLs
         )
     }

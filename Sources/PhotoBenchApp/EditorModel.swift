@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import NihoCameraCutout
 import PhotoBenchAppSupport
 import PhotoCore
 import QuartzCore
@@ -40,9 +41,27 @@ struct DirectPreviewRequest: Identifiable, @unchecked Sendable {
 /// What one preview render needs besides its revision (`PreviewRenderPump`).
 private struct PreviewRenderRequest: Sendable {
     let settings: EditSettings
+    let background: BackgroundRenderCapture?
     /// Non-nil: a drag frame (`PreviewDragSession`).
     let drag: PreviewDragSession?
     let inputHostTime: CFTimeInterval
+
+    init(
+        settings: EditSettings,
+        background: BackgroundRenderCapture?,
+        drag: PreviewDragSession?,
+        inputHostTime: CFTimeInterval
+    ) {
+        self.settings = settings
+        self.background = background
+        self.drag = drag
+        self.inputHostTime = inputHostTime
+    }
+}
+
+private struct BackgroundRenderCapture: Sendable {
+    let recipe: BackgroundEditRecipe
+    let maskPNGData: Data
 }
 
 private typealias PreviewRenderJob = PreviewRenderPump<PreviewRenderRequest>.Job
@@ -98,6 +117,7 @@ final class EditorModel: ObservableObject {
         didSet {
             guard selectedAssetID != oldValue else { return }
             finishSliderGesture()
+            finishBrushStroke()
             saveEditState(for: oldValue)
             flushPendingEditSave()
             restoreEditState(for: selectedAssetID)
@@ -116,6 +136,10 @@ final class EditorModel: ObservableObject {
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
     @Published private(set) var isBusy = false
+    @Published private(set) var isCutoutRunning = false
+    @Published private(set) var cutoutMaskErrorMessage: String?
+    @Published var cutoutBrushMode: CutoutBrushMode = .erase
+    @Published var cutoutBrushRadius: Double = 0.025
     @Published private(set) var hasPreviewInFlight = false
     @Published private(set) var directPresentedCount = 0
     @Published private(set) var directCoalescedCount = 0
@@ -139,6 +163,8 @@ final class EditorModel: ObservableObject {
     private var loadTask: Task<Void, Never>?
     private var renderTask: Task<Void, Never>?
     private var saveDebounceTask: Task<Void, Never>?
+    private var cutoutTask: Task<Void, Never>?
+    private var cutoutJobToken: UUID?
     private var loadGeneration = 0
     private var renderRevision: UInt64 = 0
     /// Live while a slider, color wheel or curve point is held: previews
@@ -155,6 +181,11 @@ final class EditorModel: ObservableObject {
     private var pendingEditSave: PendingEditSave?
     private var editHistory = PerPhotoEditHistory()
     private var activeSliderGesturePhotoID: String?
+    private var activeBrushStrokePhotoID: String?
+    /// Content-addressed cache. Old artifacts remain available while undo can
+    /// still restore a recipe created before a re-detection.
+    private var cutoutMaskDataByArtifactID: [String: Data] = [:]
+    private var currentInputSHA256: String?
 
     private struct PendingEditSave {
         let assetID: String
@@ -179,8 +210,17 @@ final class EditorModel: ObservableObject {
 
         switch self.folderAccess.restore() {
         case let .restored(url):
-            rootURL = url
-            reloadLibrary()
+            if let kind = PhotoKind.detect(url: url),
+               (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+                let asset = PhotoAsset(url: url, kind: kind)
+                rootURL = url.deletingLastPathComponent()
+                assets = [asset]
+                assetsByID = [asset.id: asset]
+                selectedAssetID = asset.id
+            } else {
+                rootURL = url
+                reloadLibrary()
+            }
         case .selectionRequired(.missing):
             isBusy = false
             statusMessage = "写真フォルダを選択してください。初回は自動走査しません。"
@@ -229,8 +269,14 @@ final class EditorModel: ObservableObject {
             return false
         }
     }
+    var backgroundEdit: BackgroundEditRecipe? { editSnapshot.backgroundEdit }
+    var isShowingCutout: Bool { backgroundRenderCapture != nil }
+    var cutoutSubjects: [CutoutSubject] { editSnapshot.backgroundEdit?.subjects ?? [] }
+    var selectedCutoutSubject: CutoutSubjectSelection? {
+        editSnapshot.backgroundEdit?.selectedSubject
+    }
     var canEdit: Bool {
-        guard selectedAssetID != nil, !isBusy else { return false }
+        guard selectedAssetID != nil, !isBusy, !isCutoutRunning else { return false }
         if case .loadFailed = persistenceStatus { return false }
         return true
     }
@@ -243,8 +289,192 @@ final class EditorModel: ObservableObject {
         return false
     }
 
-    var canExport: Bool { decodedPhoto != nil && !isBusy }
-    var canChooseFolder: Bool { !isBusy && !hasPreviewInFlight }
+    var canExport: Bool {
+        decodedPhoto != nil
+            && !isBusy
+            && !isCutoutRunning
+            && (editSnapshot.backgroundEdit == nil || backgroundRenderCapture != nil)
+    }
+    var canChooseFolder: Bool { !isBusy && !isCutoutRunning && !hasPreviewInFlight }
+
+    private var backgroundRenderCapture: BackgroundRenderCapture? {
+        guard let recipe = editSnapshot.backgroundEdit,
+              let reference = recipe.selectedMask,
+              let mask = cutoutMaskDataByArtifactID[reference.artifactID]
+        else { return nil }
+        return BackgroundRenderCapture(recipe: recipe, maskPNGData: mask)
+    }
+
+    func startBackgroundRemoval() {
+        guard !isCutoutRunning,
+              let decodedPhoto,
+              let asset = selectedAsset,
+              let inputHash = currentInputSHA256,
+              canEdit
+        else { return }
+        finishSliderGesture()
+        finishBrushStroke()
+        cutoutTask?.cancel()
+        let generation = loadGeneration
+        let assetID = asset.id
+        let token = UUID()
+        let coordinator = renderCoordinator
+        cutoutJobToken = token
+        isCutoutRunning = true
+        cutoutMaskErrorMessage = nil
+        statusMessage = "Apple Visionで被写体を検出しています…"
+        cutoutTask = Task { [weak self] in
+            do {
+                let result = try await coordinator.detectCutout(
+                    decoded: decodedPhoto,
+                    inputSHA256: inputHash
+                )
+                try Task.checkCancellation()
+                guard let self,
+                      self.isCurrentCutoutJob(token, generation: generation, assetID: assetID)
+                else { return }
+                var subjects: [CutoutSubject] = []
+                var dataByArtifactID: [String: Data] = [:]
+                for mask in result.masks {
+                    try Task.checkCancellation()
+                    guard self.isCurrentCutoutJob(token, generation: generation, assetID: assetID) else {
+                        return
+                    }
+                    let reference = try self.store.saveMask(
+                        pngData: mask.pngData,
+                        inputSHA256: result.inputSHA256,
+                        width: result.width,
+                        height: result.height,
+                        orientation: 1,
+                        selection: mask.selection
+                    )
+                    subjects.append(CutoutSubject(
+                        selection: mask.selection,
+                        pixelCount: mask.pixelCount,
+                        mask: reference
+                    ))
+                    dataByArtifactID[reference.artifactID] = mask.pngData
+                }
+                guard let selectedReference = subjects.first(where: {
+                    $0.selection == result.largestSelection
+                })?.mask,
+                      dataByArtifactID[selectedReference.artifactID] != nil
+                else {
+                    throw CutoutError.noForegroundSubjects
+                }
+                try Task.checkCancellation()
+                guard self.isCurrentCutoutJob(token, generation: generation, assetID: assetID) else {
+                    return
+                }
+                self.cutoutMaskDataByArtifactID.merge(dataByArtifactID) { _, new in new }
+                // mutateEditSnapshot intentionally observes canEdit. Finish the
+                // current job first or the completed detection is discarded.
+                self.finishCutoutJob(token, generation: generation, assetID: assetID)
+                self.mutateEditSnapshot { snapshot in
+                    snapshot.backgroundEdit = BackgroundEditRecipe(
+                        subjects: subjects,
+                        selectedSubject: result.largestSelection,
+                        background: snapshot.backgroundEdit?.background ?? .transparent
+                    )
+                }
+                self.statusMessage = "背景を除去しました。最大の被写体を選択しています。"
+            } catch is CancellationError {
+                guard let self,
+                      self.finishCutoutJob(token, generation: generation, assetID: assetID)
+                else { return }
+                self.statusMessage = "背景除去を中止しました。以前の編集は保持されています。"
+            } catch {
+                guard let self,
+                      self.finishCutoutJob(token, generation: generation, assetID: assetID)
+                else { return }
+                self.statusMessage = "背景除去に失敗しました。以前の編集は保持されています: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func cancelBackgroundRemoval() {
+        cutoutTask?.cancel()
+    }
+
+    private func isCurrentCutoutJob(_ token: UUID, generation: Int, assetID: String) -> Bool {
+        cutoutJobToken == token
+            && loadGeneration == generation
+            && selectedAssetID == assetID
+    }
+
+    @discardableResult
+    private func finishCutoutJob(_ token: UUID, generation: Int, assetID: String) -> Bool {
+        guard isCurrentCutoutJob(token, generation: generation, assetID: assetID) else {
+            return false
+        }
+        cutoutJobToken = nil
+        cutoutTask = nil
+        isCutoutRunning = false
+        return true
+    }
+
+    func removeBackgroundEdit() {
+        guard editSnapshot.backgroundEdit != nil else { return }
+        finishBrushStroke()
+        mutateEditSnapshot { $0.backgroundEdit = nil }
+        statusMessage = "背景編集を解除しました。保存済みマスクは元写真保護のため残しています。"
+    }
+
+    func selectCutoutSubject(_ selection: CutoutSubjectSelection) {
+        guard let subject = editSnapshot.backgroundEdit?.subjects.first(where: {
+            $0.selection == selection
+        }),
+              cutoutMaskDataByArtifactID[subject.mask.artifactID] != nil
+        else {
+            cutoutMaskErrorMessage = "選択した被写体の保存済みマスクを読み込めません。"
+            return
+        }
+        mutateEditSnapshot { snapshot in
+            guard snapshot.backgroundEdit?.subjects.contains(where: { $0.selection == selection }) == true else { return }
+            snapshot.backgroundEdit?.selectedSubject = selection
+            snapshot.backgroundEdit?.brushStrokes = []
+        }
+    }
+
+    func setCutoutBackground(_ background: CutoutBackground) {
+        mutateEditSnapshot { $0.backgroundEdit?.background = background }
+    }
+
+    func beginBrushStroke(at point: CutoutPoint) {
+        guard activeBrushStrokePhotoID == nil,
+              let assetID = selectedAssetID,
+              editSnapshot.backgroundEdit != nil,
+              canEdit
+        else { return }
+        finishSliderGesture()
+        activeBrushStrokePhotoID = assetID
+        editHistory.beginGroup(for: assetID, startingAt: editSnapshot)
+        mutateEditSnapshot { snapshot in
+            snapshot.backgroundEdit?.brushStrokes.append(CutoutBrushStroke(
+                mode: cutoutBrushMode,
+                radius: cutoutBrushRadius,
+                points: [point]
+            ))
+        }
+    }
+
+    func continueBrushStroke(at point: CutoutPoint) {
+        guard activeBrushStrokePhotoID == selectedAssetID else { return }
+        mutateEditSnapshot { snapshot in
+            guard var stroke = snapshot.backgroundEdit?.brushStrokes.popLast() else { return }
+            if stroke.points.last != point { stroke.points.append(point) }
+            snapshot.backgroundEdit?.brushStrokes.append(stroke)
+        }
+    }
+
+    func finishBrushStroke() {
+        guard let assetID = activeBrushStrokePhotoID else { return }
+        let current = editStates[assetID] ?? editSnapshot
+        editHistory.endGroup(for: assetID, at: current)
+        activeBrushStrokePhotoID = nil
+        refreshHistoryAvailability()
+        flushPendingEditSave()
+    }
 
     func presetDisplayName(for storedPreset: StoredXMPPreset) -> String {
         storedPreset.id == PhotoEditSnapshot.bluesky2ReferencePresetID
@@ -378,7 +608,7 @@ final class EditorModel: ObservableObject {
             editSnapshot = snapshot
             setPersistenceStatus(.saved, for: assetID)
             refreshHistoryAvailability()
-            scheduleRender()
+            loadSelection()
         } catch {
             loadBlockedAssetIDs.insert(assetID)
             setPersistenceStatus(.loadFailed(error.localizedDescription), for: assetID)
@@ -485,6 +715,45 @@ final class EditorModel: ObservableObject {
         reloadLibrary()
     }
 
+    func choosePhoto() {
+        guard canChooseFolder else {
+            statusMessage = "処理中は写真を変更できません。完了後にもう一度お試しください。"
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        panel.message = "編集する写真を1枚選んでください"
+        panel.directoryURL = rootURL ?? initialDirectoryHint
+        guard panel.runModal() == .OK,
+              let url = panel.url,
+              let kind = PhotoKind.detect(url: url)
+        else { return }
+
+        flushPendingChanges()
+        scanTask?.cancel()
+        loadTask?.cancel()
+        renderTask?.cancel()
+        renderPump.reset()
+        renderRevision &+= 1
+        do {
+            // Keep the selected file's security-scoped bookmark active for
+            // decode, inference and export-source reads until another choice.
+            try folderAccess.activateSelection(url)
+        } catch {
+            statusMessage = "写真のアクセス情報を保存できません: \(error.localizedDescription)"
+            return
+        }
+        let asset = PhotoAsset(url: url, kind: kind)
+        rootURL = url.deletingLastPathComponent()
+        selectedAssetID = nil
+        assets = [asset]
+        assetsByID = [asset.id: asset]
+        selectedAssetID = asset.id
+    }
+
     func importPreset() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "xmp") ?? .xml]
@@ -546,7 +815,12 @@ final class EditorModel: ObservableObject {
         if let job = renderPump.submit(
             revision: renderRevision,
             isDragFrame: drag != nil,
-            payload: PreviewRenderRequest(settings: renderSettings, drag: drag, inputHostTime: CACurrentMediaTime())
+            payload: PreviewRenderRequest(
+                settings: renderSettings,
+                background: backgroundRenderCapture,
+                drag: drag,
+                inputHostTime: CACurrentMediaTime()
+            )
         ) {
             startRender(job)
         }
@@ -556,7 +830,12 @@ final class EditorModel: ObservableObject {
         guard let decodedPhoto else { return }
         // A settle job renders the current settings (its revision's) exactly.
         let request = job.payload
-            ?? PreviewRenderRequest(settings: renderSettings, drag: nil, inputHostTime: CACurrentMediaTime())
+            ?? PreviewRenderRequest(
+                settings: renderSettings,
+                background: backgroundRenderCapture,
+                drag: nil,
+                inputHostTime: CACurrentMediaTime()
+            )
         let workingCopy = previewWorkingCopy
         let coordinator = renderCoordinator
         let generation = loadGeneration
@@ -732,33 +1011,69 @@ final class EditorModel: ObservableObject {
     }
 
     func exportFromPanel() {
-        guard let decodedPhoto, let source = selectedAsset else { return }
+        exportFromPanel(format: .jpeg(quality: 0.92))
+    }
+
+    func exportPNGFromPanel() {
+        exportFromPanel(format: .png)
+    }
+
+    private func exportFromPanel(format: CutoutOutputFormat) {
+        guard canExport, let decodedPhoto, let source = selectedAsset else {
+            if editSnapshot.backgroundEdit != nil, backgroundRenderCapture == nil {
+                statusMessage = "保存済みマスクを再検出するか背景編集を解除するまで書き出せません。"
+            }
+            return
+        }
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.jpeg]
+        let isPNG: Bool
+        switch format {
+        case .png: isPNG = true
+        case .jpeg: isPNG = false
+        }
+        panel.allowedContentTypes = [isPNG ? .png : .jpeg]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.directoryURL = rootURL?.appendingPathComponent("exports", isDirectory: true)
             ?? initialDirectoryHint
-        panel.nameFieldStringValue = source.url.deletingPathExtension().lastPathComponent + "-photobench.jpg"
+        panel.nameFieldStringValue = source.url.deletingPathExtension().lastPathComponent
+            + "-niho-camera." + (isPNG ? "png" : "jpg")
         guard panel.runModal() == .OK, let destination = panel.url else { return }
 
         isBusy = true
-        statusMessage = "原寸JPEGを書き出しています…"
+        statusMessage = "原寸\(isPNG ? "PNG" : "JPEG")を書き出しています…"
         let capturedSettings = renderSettings
+        let capturedBackground = backgroundRenderCapture
         let protectedSourceURLs = assets.map(\.url)
         let coordinator = renderCoordinator
         Task { [weak self] in
             do {
-                let milliseconds = try await ImplicitSecurityScopedAccess.withAccess(to: destination) {
-                    try await coordinator.exportJPEG(
+                let message = try await ImplicitSecurityScopedAccess.withAccess(to: destination) {
+                    if let capturedBackground {
+                        let size = try await coordinator.exportCutout(
+                            decoded: decodedPhoto,
+                            settings: capturedSettings,
+                            recipe: capturedBackground.recipe,
+                            maskPNGData: capturedBackground.maskPNGData,
+                            destination: destination,
+                            format: format,
+                            protectedSourceURLs: protectedSourceURLs
+                        )
+                        return "\(Int(size.width))×\(Int(size.height))のsRGB \(isPNG ? "PNG" : "JPEG")を書き出しました: \(destination.lastPathComponent)"
+                    }
+                    guard !isPNG else {
+                        throw CutoutError.unsupportedOutput(destination)
+                    }
+                    let milliseconds = try await coordinator.exportJPEG(
                         decoded: decodedPhoto,
                         settings: capturedSettings,
                         destination: destination,
                         protectedSourceURLs: protectedSourceURLs
                     )
+                    return String(format: "sRGB JPEGを書き出しました（XMP互換は項目別、%.0fms）: %@", milliseconds, destination.lastPathComponent)
                 }
                 self?.isBusy = false
-                self?.statusMessage = String(format: "sRGB JPEGを書き出しました（XMP互換は項目別、%.0fms）: %@", milliseconds, destination.lastPathComponent)
+                self?.statusMessage = message
             } catch {
                 self?.isBusy = false
                 self?.statusMessage = "書き出し失敗: \(error.localizedDescription)"
@@ -767,6 +1082,14 @@ final class EditorModel: ObservableObject {
     }
 
     private func loadSelection() {
+        cutoutTask?.cancel()
+        cutoutTask = nil
+        cutoutJobToken = nil
+        isCutoutRunning = false
+        activeBrushStrokePhotoID = nil
+        cutoutMaskDataByArtifactID = [:]
+        currentInputSHA256 = nil
+        cutoutMaskErrorMessage = nil
         guard let asset = selectedAsset else {
             loadTask?.cancel()
             renderTask?.cancel()
@@ -809,16 +1132,21 @@ final class EditorModel: ObservableObject {
 
         loadTask = Task { [weak self] in
             do {
+                let hashWorker = Task.detached(priority: .utility) {
+                    try CutoutHash.sha256(fileURL: asset.url)
+                }
                 let worker = Task.detached(priority: .userInitiated) {
                     try decoder.decode(url: asset.url)
                 }
-                let decoded = try await withTaskCancellationHandler {
-                    try await worker.value
+                let (inputHash, decoded) = try await withTaskCancellationHandler {
+                    try await (hashWorker.value, worker.value)
                 } onCancel: {
+                    hashWorker.cancel()
                     worker.cancel()
                 }
                 try Task.checkCancellation()
                 guard let self, self.loadGeneration == generation else { return }
+                self.currentInputSHA256 = inputHash
                 // Reduce the full-resolution decode once; every preview of
                 // this photo then renders from the working copy. A failure
                 // only costs speed: previews fall back to the full decode.
@@ -840,6 +1168,27 @@ final class EditorModel: ObservableObject {
                 }
                 try Task.checkCancellation()
                 guard self.loadGeneration == generation else { return }
+                if let recipe = self.editSnapshot.backgroundEdit {
+                    do {
+                        guard self.loadGeneration == generation else { return }
+                        var loaded: [String: Data] = [:]
+                        for subject in recipe.subjects {
+                            loaded[subject.mask.artifactID] = try self.store.loadMask(
+                                subject.mask,
+                                inputSHA256: inputHash,
+                                width: decoded.info.width,
+                                height: decoded.info.height,
+                                orientation: 1
+                            )
+                        }
+                        self.cutoutMaskDataByArtifactID = loaded
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        self.cutoutMaskDataByArtifactID = [:]
+                        self.cutoutMaskErrorMessage = error.localizedDescription
+                    }
+                }
                 // Resolve settings after decoding. The top-level controls are
                 // disabled while busy, but taking the value here also prevents
                 // an old pre-decode snapshot from reaching the screen.
@@ -865,7 +1214,12 @@ final class EditorModel: ObservableObject {
                 try await self.presentPreparedFrame(
                     frame,
                     job: nil,
-                    request: PreviewRenderRequest(settings: self.renderSettings, drag: nil, inputHostTime: inputHostTime),
+                    request: PreviewRenderRequest(
+                        settings: self.renderSettings,
+                        background: self.backgroundRenderCapture,
+                        drag: nil,
+                        inputHostTime: inputHostTime
+                    ),
                     initialRevision: revision
                 )
             } catch is CancellationError {
@@ -908,6 +1262,26 @@ final class EditorModel: ObservableObject {
             }
         }
         guard mayPresent() else { throw CancellationError() }
+        if let background = request.background {
+            let materialized = try await renderCoordinator.materializeCutoutPreview(
+                frame,
+                recipe: background.recipe,
+                maskPNGData: background.maskPNGData
+            )
+            try Task.checkCancellation()
+            guard mayPresent() else { throw CancellationError() }
+            directPreviewRequest = nil
+            preview = materialized.image
+            notePresented()
+            let latency = max(0, (CACurrentMediaTime() - request.inputHostTime) * 1_000)
+            if updatesTiming { renderMilliseconds = latency }
+            if revision == renderRevision { hasPreviewInFlight = false }
+            if kind == .initialSelection {
+                isBusy = false
+                statusMessage = loadedStatusMessage()
+            }
+            return
+        }
         switch previewRoute {
         case .metalDirect:
             preview = nil
@@ -952,6 +1326,9 @@ final class EditorModel: ObservableObject {
     }
 
     private func loadedStatusMessage() -> String {
+        if let cutoutMaskErrorMessage {
+            return "写真を読み込みました。\(cutoutMaskErrorMessage)"
+        }
         guard let info = decodeInfo else { return "プレビューを表示しました。" }
         if info.isRAW {
             if info.calibrationID == RAWCalibrationProfile.panasonicDCS5Lightroom93.id {
@@ -959,7 +1336,7 @@ final class EditorModel: ObservableObject {
             }
             return "\(info.backend)で原寸デコードしました（この機種の色は未校正）。"
         }
-        return "JPEGを読み込みました。"
+        return "写真を読み込みました。"
     }
 
     /// Phase2 C1/C2 made every field in `EditSettings` (tone curves, HSL,
@@ -1040,9 +1417,38 @@ final class EditorModel: ObservableObject {
         guard let asset = assetsByID[assetID], !loadBlockedAssetIDs.contains(assetID) else { return }
         editSnapshot = snapshot
         editStates[assetID] = snapshot
+        if let recipe = snapshot.backgroundEdit {
+            cacheMaskArtifactsIfNeeded(for: recipe)
+        }
         refreshHistoryAvailability()
         markEditDirty(snapshot, for: asset)
         scheduleRender()
+    }
+
+    /// Undo history survives photo navigation, while the in-memory mask cache
+    /// is intentionally photo-scoped. Reload an older recipe's immutable
+    /// artifacts before rendering it; any failure leaves capture nil and thus
+    /// keeps preview/export fail-closed.
+    private func cacheMaskArtifactsIfNeeded(for recipe: BackgroundEditRecipe) {
+        guard let inputHash = currentInputSHA256, let info = decodedPhoto?.info else {
+            cutoutMaskErrorMessage = "保存済みマスクの入力情報を確認できません。"
+            return
+        }
+        do {
+            for subject in recipe.subjects {
+                guard cutoutMaskDataByArtifactID[subject.mask.artifactID] == nil else { continue }
+                cutoutMaskDataByArtifactID[subject.mask.artifactID] = try store.loadMask(
+                    subject.mask,
+                    inputSHA256: inputHash,
+                    width: info.width,
+                    height: info.height,
+                    orientation: 1
+                )
+            }
+            cutoutMaskErrorMessage = nil
+        } catch {
+            cutoutMaskErrorMessage = error.localizedDescription
+        }
     }
 
     private func markEditDirty(_ snapshot: PhotoEditSnapshot, for asset: PhotoAsset) {

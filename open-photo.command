@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PHOTO_APP_DIR="${0:A:h}"
-PHOTO_APP_BUNDLE="$PHOTO_APP_DIR/dist/Photo Bench.app"
+PHOTO_APP_BUNDLE="$PHOTO_APP_DIR/dist/NIHO camera.app"
 PHOTO_APP_EXECUTABLE="$PHOTO_APP_BUNDLE/Contents/MacOS/PhotoBench"
 
 if [[ ! -x "$PHOTO_APP_EXECUTABLE" ]] \

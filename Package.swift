@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .library(name: "PhotoCore", targets: ["PhotoCore"]),
+        .library(name: "NihoCameraCutout", targets: ["NihoCameraCutout"]),
         .library(name: "PhotoBenchAppSupport", targets: ["PhotoBenchAppSupport"]),
         .library(
             name: "PhotoBenchCalibrationSupport",
@@ -23,7 +24,8 @@ let package = Package(
         .executable(name: "PhotoBenchBenchmark", targets: ["PhotoBenchBenchmark"]),
         .executable(name: "photobench-render", targets: ["PhotoBenchRender"]),
         .executable(name: "photobench-preview-bench", targets: ["PhotoBenchPreviewBench"]),
-        .executable(name: "photobench-engine", targets: ["PhotoBenchEngine"])
+        .executable(name: "photobench-engine", targets: ["PhotoBenchEngine"]),
+        .executable(name: "niho-camera-cutout", targets: ["NihoCameraCutoutCLI"])
     ],
     targets: [
         .systemLibrary(
@@ -43,14 +45,23 @@ let package = Package(
             path: "Sources/PhotoCore"
         ),
         .target(
+            name: "NihoCameraCutout",
+            path: "Sources/NihoCameraCutout"
+        ),
+        .target(
             name: "PhotoBenchAppSupport",
-            dependencies: ["PhotoCore"],
+            dependencies: ["PhotoCore", "NihoCameraCutout"],
             path: "Sources/PhotoBenchAppSupport"
         ),
         .executableTarget(
             name: "PhotoBenchApp",
-            dependencies: ["PhotoCore", "PhotoBenchAppSupport"],
+            dependencies: ["PhotoCore", "PhotoBenchAppSupport", "NihoCameraCutout"],
             path: "Sources/PhotoBenchApp"
+        ),
+        .executableTarget(
+            name: "NihoCameraCutoutCLI",
+            dependencies: ["NihoCameraCutout"],
+            path: "Sources/NihoCameraCutoutCLI"
         ),
         .executableTarget(
             name: "PhotoBenchCalibration",
@@ -97,8 +108,13 @@ let package = Package(
         ),
         .testTarget(
             name: "PhotoBenchAppSupportTests",
-            dependencies: ["PhotoBenchAppSupport", "PhotoCore"],
+            dependencies: ["PhotoBenchAppSupport", "PhotoCore", "NihoCameraCutout"],
             path: "Tests/PhotoBenchAppSupportTests"
+        ),
+        .testTarget(
+            name: "NihoCameraCutoutTests",
+            dependencies: ["NihoCameraCutout"],
+            path: "Tests/NihoCameraCutoutTests"
         ),
         .testTarget(
             name: "PhotoBenchCalibrationSupportTests",

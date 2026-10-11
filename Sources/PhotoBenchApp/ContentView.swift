@@ -1,6 +1,7 @@
 import AppKit
 import Metal
 import MetalKit
+import NihoCameraCutout
 import PhotoBenchAppSupport
 import PhotoCore
 import QuartzCore
@@ -11,6 +12,7 @@ struct ContentView: View {
     @EnvironmentObject private var model: EditorModel
     @State private var presetPendingDeletion: StoredXMPPreset?
     @State private var isBasicSectionExpanded = true
+    @State private var isDrawingCutoutStroke = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,6 +54,8 @@ struct ContentView: View {
         HStack(spacing: 12) {
             Button("フォルダを開く", action: model.chooseFolder)
                 .disabled(!model.canChooseFolder)
+            Button("写真を開く", action: model.choosePhoto)
+                .disabled(!model.canChooseFolder)
             Button("プリセットを読み込む", action: model.importPreset)
                 .disabled(model.isBusy)
             Divider().frame(height: 18)
@@ -90,9 +94,13 @@ struct ContentView: View {
                     .background(Color.blue.opacity(0.16), in: Capsule())
                     .foregroundStyle(.blue)
             }
-            Button("JPEGを書き出す", action: model.exportFromPanel)
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.canExport)
+            Menu("書き出す") {
+                Button("JPEGを書き出す", action: model.exportFromPanel)
+                Button("PNGを書き出す", action: model.exportPNGFromPanel)
+                    .disabled(!model.isShowingCutout)
+            }
+            .menuStyle(.borderlessButton)
+            .disabled(!model.canExport)
         }
         .padding(.horizontal, 14)
         .frame(height: 52)
@@ -132,36 +140,97 @@ struct ContentView: View {
 
     private var centerPane: some View {
         VStack(spacing: 0) {
-            ZStack {
-                Color.black.opacity(0.82)
-                if model.previewRoute == .metalDirect,
+            GeometryReader { geometry in
+                ZStack {
+                    if model.isShowingCutout {
+                        CheckerboardBackground()
+                    } else {
+                        Color.black.opacity(0.82)
+                    }
+                    if model.previewRoute == .metalDirect,
+                       !model.isShowingCutout,
                    let request = model.directPreviewRequest {
-                    DirectMetalPreviewView(
-                        request: request,
-                        onPresented: model.directPreviewPresented,
-                        onCoalesced: model.directPreviewCoalesced,
-                        onDrawableUnavailable: model.directPreviewDrawableUnavailable,
-                        onDropped: model.directPreviewDropped,
-                        onFailure: model.directPreviewFailed
-                    )
-                    .padding(20)
-                } else if let preview = model.preview {
-                    Image(nsImage: preview)
-                        .resizable()
-                        .interpolation(.high)
-                        .antialiased(true)
-                        .aspectRatio(contentMode: .fit)
+                        DirectMetalPreviewView(
+                            request: request,
+                            onPresented: model.directPreviewPresented,
+                            onCoalesced: model.directPreviewCoalesced,
+                            onDrawableUnavailable: model.directPreviewDrawableUnavailable,
+                            onDropped: model.directPreviewDropped,
+                            onFailure: model.directPreviewFailed
+                        )
                         .padding(20)
-            } else if model.isBusy || model.hasPreviewInFlight {
-                ProgressView("プレビューを準備中…")
-                } else {
-                    ContentUnavailableView("写真がありません", systemImage: "photo")
+                    } else if let preview = model.preview {
+                        Image(nsImage: preview)
+                            .resizable()
+                            .interpolation(.high)
+                            .antialiased(true)
+                            .aspectRatio(contentMode: .fit)
+                            .padding(20)
+                    } else if model.isBusy || model.hasPreviewInFlight {
+                        ProgressView("プレビューを準備中…")
+                    } else {
+                        ContentUnavailableView("写真がありません", systemImage: "photo")
+                    }
                 }
+                .contentShape(Rectangle())
+                .simultaneousGesture(cutoutBrushGesture(in: geometry.size))
             }
             filmstrip
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .layoutPriority(1)
+    }
+
+    private func cutoutBrushGesture(in canvasSize: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard model.isShowingCutout,
+                      let imageSize = model.preview?.size,
+                      let point = normalizedImagePoint(
+                        value.location,
+                        canvasSize: canvasSize,
+                        imageSize: imageSize
+                      )
+                else { return }
+                if isDrawingCutoutStroke {
+                    model.continueBrushStroke(at: point)
+                } else {
+                    isDrawingCutoutStroke = true
+                    model.beginBrushStroke(at: point)
+                }
+            }
+            .onEnded { _ in
+                guard isDrawingCutoutStroke else { return }
+                isDrawingCutoutStroke = false
+                model.finishBrushStroke()
+            }
+    }
+
+    private func normalizedImagePoint(
+        _ location: CGPoint,
+        canvasSize: CGSize,
+        imageSize: CGSize
+    ) -> CutoutPoint? {
+        let available = CGSize(
+            width: max(0, canvasSize.width - 40),
+            height: max(0, canvasSize.height - 40)
+        )
+        guard imageSize.width > 0, imageSize.height > 0,
+              available.width > 0, available.height > 0
+        else { return nil }
+        let scale = min(available.width / imageSize.width, available.height / imageSize.height)
+        let fitted = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        let origin = CGPoint(
+            x: 20 + (available.width - fitted.width) / 2,
+            y: 20 + (available.height - fitted.height) / 2
+        )
+        guard location.x >= origin.x, location.x <= origin.x + fitted.width,
+              location.y >= origin.y, location.y <= origin.y + fitted.height
+        else { return nil }
+        return CutoutPoint(
+            x: Double((location.x - origin.x) / fitted.width),
+            y: Double((location.y - origin.y) / fitted.height)
+        )
     }
 
     private var filmstrip: some View {
@@ -203,6 +272,77 @@ struct ContentView: View {
     private var inspectorPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("背景").font(.headline)
+                        Spacer()
+                        if model.isCutoutRunning {
+                            ProgressView().controlSize(.small)
+                            Button("中止", action: model.cancelBackgroundRemoval)
+                                .buttonStyle(.link)
+                        }
+                    }
+                    if model.backgroundEdit == nil {
+                        Button("背景を除去", systemImage: "person.crop.rectangle.badge.minus") {
+                            model.startBackgroundRemoval()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canEdit)
+                        Text("Apple Visionが端末内で人物・家具・商品を検出します。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("被写体", selection: Binding(
+                            get: { model.selectedCutoutSubject ?? .all },
+                            set: { model.selectCutoutSubject($0) }
+                        )) {
+                            ForEach(model.cutoutSubjects) { subject in
+                                Text(cutoutSubjectLabel(subject))
+                                    .tag(subject.selection)
+                            }
+                        }
+
+                        Picker("背景", selection: cutoutBackgroundMode) {
+                            Text("透明").tag(0)
+                            Text("白").tag(1)
+                            Text("色").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+                        if cutoutBackgroundMode.wrappedValue == 2 {
+                            ColorPicker("背景色", selection: cutoutColor, supportsOpacity: false)
+                        }
+
+                        Picker("ブラシ", selection: $model.cutoutBrushMode) {
+                            Text("消す").tag(CutoutBrushMode.erase)
+                            Text("戻す").tag(CutoutBrushMode.restore)
+                        }
+                        .pickerStyle(.segmented)
+                        HStack {
+                            Text("サイズ").font(.caption)
+                            Slider(value: $model.cutoutBrushRadius, in: 0.003...0.12)
+                            Text(String(format: "%.0f", model.cutoutBrushRadius * 1000))
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 30, alignment: .trailing)
+                        }
+                        Text("プレビュー上をドラッグしてマスクを補正します。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("再検出", action: model.startBackgroundRemoval)
+                            Button("背景編集を解除", role: .destructive, action: model.removeBackgroundEdit)
+                        }
+                        .buttonStyle(.link)
+                    }
+                    if let error = model.cutoutMaskErrorMessage {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Divider()
+
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("プリセットライブラリ").font(.headline)
@@ -411,6 +551,55 @@ struct ContentView: View {
         .frame(width: 340)
     }
 
+    private func cutoutSubjectLabel(_ subject: CutoutSubject) -> String {
+        switch subject.selection {
+        case let .instance(id): "被写体 \(id)"
+        case .all: "すべての被写体"
+        }
+    }
+
+    private var cutoutBackgroundMode: Binding<Int> {
+        Binding(
+            get: {
+                guard let background = model.backgroundEdit?.background else { return 0 }
+                switch background {
+                case .transparent: return 0
+                case let .color(color): return color == .white ? 1 : 2
+                }
+            },
+            set: { mode in
+                switch mode {
+                case 0: model.setCutoutBackground(.transparent)
+                case 1: model.setCutoutBackground(.color(.white))
+                default:
+                    if case let .color(color)? = model.backgroundEdit?.background,
+                       color != .white {
+                        model.setCutoutBackground(.color(color))
+                    } else {
+                        model.setCutoutBackground(.color(CutoutRGBA(red: 0.2, green: 0.45, blue: 0.85)))
+                    }
+                }
+            }
+        )
+    }
+
+    private var cutoutColor: Binding<Color> {
+        Binding(
+            get: {
+                guard case let .color(value)? = model.backgroundEdit?.background else { return .white }
+                return Color(.sRGB, red: value.red, green: value.green, blue: value.blue, opacity: 1)
+            },
+            set: { value in
+                let nsColor = NSColor(value).usingColorSpace(.sRGB) ?? .white
+                model.setCutoutBackground(.color(CutoutRGBA(
+                    red: Double(nsColor.redComponent),
+                    green: Double(nsColor.greenComponent),
+                    blue: Double(nsColor.blueComponent)
+                )))
+            }
+        )
+    }
+
     private var statusBar: some View {
         HStack {
             if model.isBusy { ProgressView().controlSize(.small) }
@@ -455,6 +644,33 @@ struct ContentView: View {
         case .approximate: .yellow
         case .unsupported: .red
         case .metadata: .secondary
+        }
+    }
+}
+
+private struct CheckerboardBackground: View {
+    var body: some View {
+        Canvas { context, size in
+            let tile: CGFloat = 14
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(white: 0.82)))
+            var y: CGFloat = 0
+            var row = 0
+            while y < size.height {
+                var x: CGFloat = 0
+                var column = 0
+                while x < size.width {
+                    if (row + column).isMultiple(of: 2) {
+                        context.fill(
+                            Path(CGRect(x: x, y: y, width: tile, height: tile)),
+                            with: .color(Color(white: 0.64))
+                        )
+                    }
+                    x += tile
+                    column += 1
+                }
+                y += tile
+                row += 1
+            }
         }
     }
 }

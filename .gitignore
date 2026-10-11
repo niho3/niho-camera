@@ -71,6 +71,9 @@ xcuserdata/
 /*.heic
 /*.PNG
 /*.png
+# Private photos dropped into the source tree for local checks (RAW, iPhone
+# JPEGs with GPS, Lightroom sidecars). Never publish them.
+/Sources/additional/
 
 # Root-level Lightroom sidecars are private by default. These reviewed,
 # owner-authored project preset revisions are explicit source fixtures.

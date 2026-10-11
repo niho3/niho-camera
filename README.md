@@ -1,4 +1,4 @@
-# Photo Bench（仮称）
+# NIHO camera
 
 **進捗・現在の目標・次の作業:** [PROGRESS.md](./docs/PROGRESS.md)
 
@@ -17,7 +17,9 @@ Finderから`open-photo.command`をダブルクリックします。ターミナ
 ./open-photo.command
 ```
 
-ビルド済みアプリは`dist/Photo Bench.app`です。`open-photo.command`はソースがアプリより新しければ自動で再ビルドします。初回起動時は「フォルダを開く」から写真ルートを選び、以後はmacOSのsecurity-scoped bookmarkで同じフォルダを復元します。起動直後にDocumentsや外付けSSDを勝手に走査しません。手動ビルドは次で行えます。
+ビルド済みアプリは`dist/NIHO camera.app`です（互換性のため実行ファイル名は`PhotoBench`のままです）。`open-photo.command`はソースがアプリより新しければ自動で再ビルドします。初回起動時は「フォルダを開く」から写真ルートを選び、以後はmacOSのsecurity-scoped bookmarkで同じフォルダを復元します。起動直後にDocumentsや外付けSSDを勝手に走査しません。手動ビルドは次で行えます。
+
+「写真を開く」では1枚だけ選択できます。2026-10-12のMac Studio製ビルドはApple Silicon・macOS 26以降向けです。Swift/Visionのソース対象はmacOS 14以上ですが、配布バンドルの最低OSは同梱するdylibの要件も含めて自動設定します。LibRawなどの依存とライセンス文をアプリ内へ同梱するため、利用するMacにHomebrewを入れる必要はありません。
 
 ```sh
 ./scripts/build-app.sh
@@ -35,6 +37,14 @@ Finderから`open-photo.command`をダブルクリックします。ターミナ
 
 編集と登録 XMP はアプリの Application Support / PhotoBench 内に保存し、原本には書き込みません。写真を移動・改名すると別の写真として扱います。Undo 履歴は起動中のみ保持します。保存に失敗した場合は「再試行」を使え、失敗が残ったままの終了時は確認を表示します。
 
+背景除去はApple Visionを端末内で実行します。既定では最大の被写体を選び、個別被写体／全被写体の切替、透明／白／任意色背景、消す／戻すブラシに対応します。マスクはApplication Support / PhotoBench内へ入力内容hashと寸法・向き・推論器版を付けて不変保存し、原寸PNGまたは背景合成JPEGとして書き出します。CLIは次の形式です。
+
+背景除去の設計・検証結果は[詳細設計](docs/NIHO_CAMERA_BACKGROUND_REMOVAL.md)を参照してください。GPT / ClaudeのサブスクやAPIキーは不要です。今回の実装はこのMacアプリ側で、NIHO本体への接続は別の工程です。
+
+```bash
+swift run niho-camera-cutout --input input.jpg --output cutout.png --subject largest --background transparent
+```
+
 ## 現在できること
 
 - ユーザーが選んだフォルダ以下にある JPEG / HEIC / PNG / TIFF / RAW を非同期走査し、選択権限を次回起動へ安全に保存
@@ -43,6 +53,7 @@ Finderから`open-photo.command`をダブルクリックします。ターミナ
 - **計測モデルの現像操作**（`docs/PHASE2_DEVELOP_PIPELINE.md`、`docs/PHASE2_C2_C3.md`）: 露出（RAW はトーンカーブ前のリニア倍率）、絶対 WB（DNG SDK の式）、コントラスト／白／黒／parametric／点カーブ（sRGB 符号化空間の RGBTone。白を下げる・上げる、黒を上げるときは、輝度だけを動かす式と混ぜて LR と同じく彩度を保つ）、HSL 8 帯、Vibrance／Saturation、Color Grading／Split Toning、Camera Calibration、Highlights／Shadows（局所ラプラシアン、Metal compute）、Texture／Clarity（Laplacian 段別ゲイン）、Dehaze（大域カーブ＋彩度倍率）
 - XMP の属性形式と要素形式を解析し、未対応項目（シャープ／NR、粒子、周辺光量、増分 WB、Refine Saturation ≠ 100）は互換性一覧で表示
 - 写真ごとの編集・適用プリセットをバージョン付き JSON に自動保存し、再起動後に復元。破損・未知形式の記録は上書きせず読み込みエラーを表示
+- Apple Visionによる端末内の背景除去。最大／個別／全被写体、透明・白・任意色、消す／戻すブラシ、原寸PNG／JPEGに対応
 - ドラッグを 1 操作として取り消し・やり直し。写真ごとのセッション履歴を最大 100 操作保持
 - スライダーのドラッグ中は近似で描いて速く追従し（Mac mini で 1 更新 0.1 秒以内）、離すと正確な画に静かに差し替える。`PHOTO_BENCH_PREVIEW_DIAG=1` で段ごとの時間を stderr に出し、`photobench-preview-bench` でドラッグを再現して計測できる
 - 4 XMP を初期登録し、追加読込・重複抑止・登録削除に対応。適用済みの写真はプリセット登録を削除しても維持
@@ -114,7 +125,7 @@ process-freshは新しいworker processですが、timer前のmanifest検証がR
 - Lightroom との一致は完成していません。単体操作は平均 ΔE00 1〜2.5、4 プリセットは RAW で 1.2〜2.3、JPEG 入力で 1.8〜2.7（night は 5.4〜6.0）です。ハイライト／シャドウは写真ごとの統計量で振幅と帯域位置を変える画像適応（RAW 14 scene、JPEG 8 scene の計測）を入れていますが、Lightroom の適応則の推定であって同一ではありません（`docs/ENGINE_ROADMAP.md`）。
 - Adobe の現像数式は非公開で、計測に基づく近似です。カメラプロファイル（DCP）と Adobe Color は Lightroom の導入先から実行時に読み、リポジトリには含めません。DC-S5 以外の機種は DCP があれば動きますが検証していません。
 - 周辺光量補正、色収差補正、既定シャープ／NR、粒子、非 RAW の増分 WB は未実装です。
-- クロップ、ブラシマスク、SQLite カタログ、評価・選別、アルバム、移動した写真の再リンクは未実装です。
+- クロップ、明るさ等の局所補正ブラシ、SQLite カタログ、評価・選別、アルバム、移動した写真の再リンクは未実装です。
 - 教師データは 3 scene（同一カメラ）と 4 プリセット × 2 scene が中心で、独立 holdout はまだ少数です。
 - 校正 archive の置換は atomic ですが cross-process lock がなく、同じ root の並行校正は禁止です。
 - 個人用 Mac mini（16GB）では原寸 float パイプラインの並行実行で watchdog リセットが起きたため、重い処理は Mac Studio で `scripts/studio/studio-run.sh` 経由で実行します（`docs/PROGRESS.md`「実行環境の注意」）。

@@ -857,6 +857,23 @@ public final class RenderEngine: @unchecked Sendable {
         ).totalMilliseconds
     }
 
+    /// Full-resolution, orientation-normalized sRGB output before encoding.
+    /// Background removal consumes this small public hook so it does not
+    /// duplicate or alter the RAW/XMP rendering pipeline.
+    public func prepareFullResolutionOutput(
+        decoded: DecodedPhoto,
+        settings: EditSettings
+    ) throws -> CIImage {
+        try Self.requireFullResolutionDecodeForExport(decoded)
+        return try makeOutputGraph(
+            decoded: decoded,
+            settings: settings,
+            maxDimension: nil,
+            downsamplingFilter: .lanczos,
+            outputTransformPlacement: .afterDownsampling
+        ).image
+    }
+
     public func exportJPEGMeasured(
         decoded: DecodedPhoto,
         settings: EditSettings,

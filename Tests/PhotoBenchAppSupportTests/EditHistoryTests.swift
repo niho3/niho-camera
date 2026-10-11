@@ -1,8 +1,31 @@
 import PhotoBenchAppSupport
 import PhotoCore
+import NihoCameraCutout
 import Testing
 
 struct EditHistoryTests {
+    @Test func backgroundRecipeParticipatesInUndoRedo() {
+        let photoID = "/photos/cutout.jpg"
+        let reference = CutoutMaskReference(
+            artifactID: String(repeating: "1", count: 64),
+            maskSHA256: String(repeating: "2", count: 64),
+            inputSHA256: String(repeating: "3", count: 64),
+            width: 100,
+            height: 200,
+            selection: .instance(1)
+        )
+        var cutout = PhotoEditSnapshot.neutral
+        cutout.backgroundEdit = BackgroundEditRecipe(
+            subjects: [CutoutSubject(selection: .instance(1), pixelCount: 10_000, mask: reference)],
+            selectedSubject: .instance(1),
+            background: .transparent
+        )
+        var history = PerPhotoEditHistory()
+        history.record(before: .neutral, after: cutout, for: photoID)
+        #expect(history.undo(for: photoID, current: cutout) == .neutral)
+        #expect(history.redo(for: photoID, current: .neutral) == cutout)
+    }
+
     @Test func dragIsOneUndoGroupAndUndoRedoFollowSnapshots() {
         let photoID = "/photos/one.jpg"
         let neutral = PhotoEditSnapshot.neutral

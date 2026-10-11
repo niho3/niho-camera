@@ -43,7 +43,7 @@ struct PhotoBenchApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Photo Bench") {
+        WindowGroup("NIHO camera") {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 1_140, minHeight: 720)
@@ -60,8 +60,10 @@ struct PhotoBenchApp: App {
                     .disabled(!model.canRedo || !model.canEdit)
             }
             CommandGroup(replacing: .newItem) {
-                Button("写真フォルダを開く…", action: model.chooseFolder)
+                Button("写真を開く…", action: model.choosePhoto)
                     .keyboardShortcut("o")
+                Button("写真フォルダを開く…", action: model.chooseFolder)
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("XMPプリセットを読み込む…", action: model.importPreset)
                     .keyboardShortcut("p", modifiers: [.command, .shift])
             }
@@ -69,6 +71,9 @@ struct PhotoBenchApp: App {
                 Button("JPEGを書き出す…", action: model.exportFromPanel)
                     .keyboardShortcut("e", modifiers: [.command])
                     .disabled(!model.canExport)
+                Button("PNGを書き出す…", action: model.exportPNGFromPanel)
+                    .keyboardShortcut("e", modifiers: [.command, .option])
+                    .disabled(!model.canExport || !model.isShowingCutout)
             }
         }
     }

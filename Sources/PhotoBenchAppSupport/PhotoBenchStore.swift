@@ -1,5 +1,7 @@
 import CryptoKit
+import Darwin
 import Foundation
+import NihoCameraCutout
 import PhotoCore
 
 public struct PhotoEditSnapshot: Codable, Equatable, Sendable {
@@ -7,17 +9,20 @@ public struct PhotoEditSnapshot: Codable, Equatable, Sendable {
     public var appliedPresetID: String?
     public var appliedPreset: XMPPreset?
     public var applyApproximateXMPColor: Bool
+    public var backgroundEdit: BackgroundEditRecipe?
 
     public init(
         settings: EditSettings = .neutral,
         appliedPresetID: String? = nil,
         appliedPreset: XMPPreset? = nil,
-        applyApproximateXMPColor: Bool = false
+        applyApproximateXMPColor: Bool = false,
+        backgroundEdit: BackgroundEditRecipe? = nil
     ) {
         self.settings = settings
         self.appliedPresetID = appliedPresetID
         self.appliedPreset = appliedPreset
         self.applyApproximateXMPColor = applyApproximateXMPColor
+        self.backgroundEdit = backgroundEdit
     }
 
     public static let neutral = PhotoEditSnapshot()
@@ -32,6 +37,7 @@ public struct PhotoEditRecord: Codable, Equatable, Sendable {
     public let appliedPresetID: String?
     public let appliedPreset: XMPPreset?
     public let applyApproximateXMPColor: Bool
+    public let backgroundEdit: BackgroundEditRecipe?
 
     public init(photoID: String, snapshot: PhotoEditSnapshot) {
         schemaVersion = Self.currentSchemaVersion
@@ -40,6 +46,7 @@ public struct PhotoEditRecord: Codable, Equatable, Sendable {
         appliedPresetID = snapshot.appliedPresetID
         appliedPreset = snapshot.appliedPreset
         applyApproximateXMPColor = snapshot.applyApproximateXMPColor
+        backgroundEdit = snapshot.backgroundEdit
     }
 
     public var snapshot: PhotoEditSnapshot {
@@ -47,7 +54,8 @@ public struct PhotoEditRecord: Codable, Equatable, Sendable {
             settings: settings,
             appliedPresetID: appliedPresetID,
             appliedPreset: appliedPreset,
-            applyApproximateXMPColor: applyApproximateXMPColor
+            applyApproximateXMPColor: applyApproximateXMPColor,
+            backgroundEdit: backgroundEdit
         )
     }
 }
@@ -99,7 +107,8 @@ public extension PhotoEditSnapshot {
             settings: storedPreset.preset.applying(to: settings),
             appliedPresetID: storedPreset.id,
             appliedPreset: storedPreset.preset,
-            applyApproximateXMPColor: false
+            applyApproximateXMPColor: false,
+            backgroundEdit: backgroundEdit
         )
     }
 }
@@ -124,6 +133,11 @@ public enum PhotoBenchStoreError: LocalizedError, Equatable {
     case invalidPresetID
     case corruptSeedState(String)
     case unsupportedSeedSchema(Int)
+    case invalidMaskReference
+    case missingMask(String)
+    case corruptMask(String)
+    case maskInputMismatch
+    case maskGeometryMismatch
 
     public var errorDescription: String? {
         switch self {
@@ -137,6 +151,11 @@ public enum PhotoBenchStoreError: LocalizedError, Equatable {
         case .invalidPresetID: "プリセットIDが不正です。"
         case let .corruptSeedState(reason): "標準プリセットの登録状態を読み込めません: \(reason)"
         case let .unsupportedSeedSchema(version): "未対応の標準プリセット登録状態です（schema \(version)）。"
+        case .invalidMaskReference: "マスク参照が不正です。管理フォルダ外の参照は使用しません。"
+        case let .missingMask(id): "保存済みマスクが見つかりません（\(id)）。背景編集は適用していません。"
+        case let .corruptMask(reason): "保存済みマスクが破損しています: \(reason)"
+        case .maskInputMismatch: "写真の内容が背景マスク作成時から変わったため、保存済みマスクを使用しません。"
+        case .maskGeometryMismatch: "写真の寸法または向きが背景マスクと一致しないため、保存済みマスクを使用しません。"
         }
     }
 }
@@ -249,6 +268,89 @@ public final class PhotoBenchStore {
         try writeAtomically(record, to: editRecordURL(for: photoURL))
     }
 
+    /// Writes an immutable mask before its reference can be persisted in an
+    /// edit record. Existing bytes with the same content-derived ID are reused.
+    public func saveMask(
+        pngData: Data,
+        inputSHA256: String,
+        width: Int,
+        height: Int,
+        orientation: UInt32 = 1,
+        selection: CutoutSubjectSelection
+    ) throws -> CutoutMaskReference {
+        guard Self.isValidSHA256(inputSHA256), width > 0, height > 0 else {
+            throw PhotoBenchStoreError.invalidMaskReference
+        }
+        let raster: MaskRaster
+        do {
+            raster = try MaskRaster(pngData: pngData)
+        } catch {
+            throw PhotoBenchStoreError.corruptMask(error.localizedDescription)
+        }
+        guard raster.width == width, raster.height == height else {
+            throw PhotoBenchStoreError.maskGeometryMismatch
+        }
+        let maskHash = Self.sha256Hex(pngData)
+        let artifactID = Self.maskArtifactID(
+            inputSHA256: inputSHA256,
+            maskSHA256: maskHash,
+            width: width,
+            height: height,
+            orientation: orientation,
+            selection: selection
+        )
+        let reference = CutoutMaskReference(
+            artifactID: artifactID,
+            maskSHA256: maskHash,
+            inputSHA256: inputSHA256,
+            width: width,
+            height: height,
+            orientation: orientation,
+            selection: selection
+        )
+        try fileManager.createDirectory(at: masksDirectory, withIntermediateDirectories: true)
+        let destination = try maskURL(for: reference)
+        try installImmutableMask(pngData, hash: maskHash, at: destination)
+        return reference
+    }
+
+    public func loadMask(
+        _ reference: CutoutMaskReference,
+        inputSHA256: String,
+        width: Int,
+        height: Int,
+        orientation: UInt32 = 1
+    ) throws -> Data {
+        guard reference.inputSHA256 == inputSHA256 else {
+            throw PhotoBenchStoreError.maskInputMismatch
+        }
+        guard reference.width == width,
+              reference.height == height,
+              reference.orientation == orientation
+        else { throw PhotoBenchStoreError.maskGeometryMismatch }
+        let url = try maskURL(for: reference)
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw PhotoBenchStoreError.missingMask(reference.artifactID)
+        }
+        let data: Data
+        do { data = try Data(contentsOf: url) }
+        catch { throw PhotoBenchStoreError.corruptMask(error.localizedDescription) }
+        guard Self.sha256Hex(data) == reference.maskSHA256 else {
+            throw PhotoBenchStoreError.corruptMask("SHA-256が一致しません。")
+        }
+        do {
+            let raster = try MaskRaster(pngData: data)
+            guard raster.width == width, raster.height == height else {
+                throw PhotoBenchStoreError.maskGeometryMismatch
+            }
+        } catch let error as PhotoBenchStoreError {
+            throw error
+        } catch {
+            throw PhotoBenchStoreError.corruptMask(error.localizedDescription)
+        }
+        return data
+    }
+
     public func listPresets() throws -> [StoredXMPPreset] {
         try fileManager.createDirectory(at: presetsDirectory, withIntermediateDirectories: true)
         let urls: [URL]
@@ -358,6 +460,10 @@ public final class PhotoBenchStore {
         rootDirectory.appendingPathComponent("Metadata", isDirectory: true)
     }
 
+    private var masksDirectory: URL {
+        rootDirectory.appendingPathComponent("Masks", isDirectory: true)
+    }
+
     private var seedStateURL: URL {
         metadataDirectory.appendingPathComponent("preset-seed-state.json")
     }
@@ -370,10 +476,118 @@ public final class PhotoBenchStore {
         id.count == 64 && id.allSatisfy { $0.isHexDigit }
     }
 
+    private static func isValidSHA256(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (97...102).contains($0)
+        }
+    }
+
+    private static func maskArtifactID(
+        inputSHA256: String,
+        maskSHA256: String,
+        width: Int,
+        height: Int,
+        orientation: UInt32,
+        selection: CutoutSubjectSelection
+    ) -> String {
+        let identity = "\(CutoutMaskReference.currentSchemaVersion):\(inputSHA256):\(width)x\(height):\(orientation):\(CutoutMaskReference.engineIdentifier):\(CutoutMaskReference.engineRevision):\(selection.storageKey):\(maskSHA256)"
+        return sha256Hex(Data(identity.utf8))
+    }
+
+    private static func isValidSelection(_ selection: CutoutSubjectSelection) -> Bool {
+        switch selection {
+        case let .instance(id): id > 0
+        case .all: true
+        }
+    }
+
+    private func maskURL(for reference: CutoutMaskReference) throws -> URL {
+        guard Self.isValidSHA256(reference.artifactID),
+              Self.isValidSHA256(reference.maskSHA256),
+              Self.isValidSHA256(reference.inputSHA256),
+              Self.isValidSelection(reference.selection),
+              reference.schemaVersion == CutoutMaskReference.currentSchemaVersion,
+              reference.engineIdentifier == CutoutMaskReference.engineIdentifier,
+              reference.engineRevision == CutoutMaskReference.engineRevision,
+              reference.artifactID == Self.maskArtifactID(
+                inputSHA256: reference.inputSHA256,
+                maskSHA256: reference.maskSHA256,
+                width: reference.width,
+                height: reference.height,
+                orientation: reference.orientation,
+                selection: reference.selection
+              )
+        else { throw PhotoBenchStoreError.invalidMaskReference }
+        let candidate = masksDirectory.appendingPathComponent(reference.artifactID + ".png")
+        let rootPath = masksDirectory.standardizedFileURL.path + "/"
+        guard candidate.standardizedFileURL.path.hasPrefix(rootPath) else {
+            throw PhotoBenchStoreError.invalidMaskReference
+        }
+        return candidate
+    }
+
+    /// Installs content-addressed bytes without replacing anything already at
+    /// the destination. Foundation's `.atomic + .withoutOverwriting` crashes;
+    /// an exclusive temp file plus link(2) supplies the intended semantics.
+    private func installImmutableMask(_ data: Data, hash: String, at destination: URL) throws {
+        let temporary = destination.deletingLastPathComponent()
+            .appendingPathComponent(".mask-\(UUID().uuidString).tmp")
+        let descriptor = Darwin.open(
+            temporary.path,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+            mode_t(S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+        )
+        guard descriptor >= 0 else { throw Self.currentPOSIXError() }
+        var isOpen = true
+        defer {
+            if isOpen { _ = Darwin.close(descriptor) }
+            _ = Darwin.unlink(temporary.path)
+        }
+
+        try data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(descriptor, base.advanced(by: offset), bytes.count - offset)
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    throw Self.currentPOSIXError()
+                }
+                guard count > 0 else { throw POSIXError(.EIO) }
+                offset += count
+            }
+        }
+        guard Darwin.fsync(descriptor) == 0 else { throw Self.currentPOSIXError() }
+        guard Darwin.close(descriptor) == 0 else {
+            isOpen = false
+            throw Self.currentPOSIXError()
+        }
+        isOpen = false
+
+        guard Darwin.link(temporary.path, destination.path) == 0 else {
+            let linkError = errno
+            if linkError == EEXIST,
+               let existing = try? Data(contentsOf: destination),
+               Self.sha256Hex(existing) == hash {
+                return
+            }
+            if linkError == EEXIST {
+                throw PhotoBenchStoreError.corruptMask("同じIDのマスク内容が一致しません。")
+            }
+            errno = linkError
+            throw Self.currentPOSIXError()
+        }
+    }
+
+    private static func currentPOSIXError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
     private func ensureDirectories() throws {
         try fileManager.createDirectory(at: editsDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: presetsDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: metadataDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: masksDirectory, withIntermediateDirectories: true)
     }
 
     private func readStoredPreset(at url: URL) throws -> StoredXMPPreset {
