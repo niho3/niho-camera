@@ -19,7 +19,7 @@ struct SectionHeader: View {
 
     var body: some View {
         HStack {
-            Text(title).font(.headline)
+            Text(title).font(.headline).foregroundStyle(NihoPalette.heading)
             Spacer()
             Button("リセット", action: onReset)
                 .buttonStyle(.link)
@@ -51,7 +51,7 @@ struct AdjustmentSliderView: View {
                 Spacer()
                 Text(String(format: format, value.wrappedValue))
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
                     .frame(width: 48, alignment: .trailing)
             }
             // LR's sliders move in whole units (0.01 for exposure); snapping
@@ -64,7 +64,7 @@ struct AdjustmentSliderView: View {
             if let guidance {
                 Text(guidance)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
@@ -91,7 +91,7 @@ struct WhiteBalanceSection: View {
                 Text("ホワイトバランス").font(.subheadline.weight(.semibold))
                 Spacer()
                 if showsAbsoluteControls {
-                    Text(modeLabel).font(.caption2).foregroundStyle(.secondary)
+                    Text(modeLabel).font(.caption2).foregroundStyle(NihoPalette.muted)
                 }
             }
             if showsAbsoluteControls {
@@ -99,11 +99,11 @@ struct WhiteBalanceSection: View {
             } else if model.decodeInfo?.isRAW == true {
                 Text("この写真は撮影時ホワイトバランスを取得できませんでした。下の相対調整のみ使用できます。")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             } else if model.decodeInfo != nil {
                 Text("非RAW画像は絶対ホワイトバランスに未対応です。下の相対調整のみ使用できます。")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
             DisclosureGroup("微調整（撮影時基準の相対）") {
                 VStack(alignment: .leading, spacing: 12) {
@@ -192,7 +192,7 @@ struct WhiteBalanceSection: View {
                     Spacer()
                     Text("\(Int(currentTemperatureAndTint.temperature.rounded())) K")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(NihoPalette.muted)
                 }
                 Slider(value: temperatureLogBinding, in: logRange, onEditingChanged: { model.sliderEditingChanged($0) })
             }
@@ -202,7 +202,7 @@ struct WhiteBalanceSection: View {
                     Spacer()
                     Text("\(Int(currentTemperatureAndTint.tint.rounded()))")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(NihoPalette.muted)
                 }
                 Slider(value: tintBinding, in: -150...150, step: 1, onEditingChanged: { model.sliderEditingChanged($0) })
             }
@@ -237,7 +237,7 @@ struct ToneCurveSection: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("分割点").font(.caption).foregroundStyle(.secondary)
+                Text("分割点").font(.caption).foregroundStyle(NihoPalette.muted)
                 splitSlider(
                     "シャドウ分割", keyPath: \.parametricShadowSplit,
                     lowerSibling: nil, upperSibling: \.parametricMidtoneSplit
@@ -252,7 +252,7 @@ struct ToneCurveSection: View {
                 )
             }
 
-            Divider()
+            NihoDivider()
 
             Picker("チャンネル", selection: $selectedChannel) {
                 Text("RGB").tag(ToneCurveChannel.rgb)
@@ -270,7 +270,7 @@ struct ToneCurveSection: View {
             }
             Text("空き位置をクリックで点を追加、ドラッグで移動、枠の外へドラッグして離すと削除できます。")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
 
             HStack {
                 Spacer()
@@ -313,7 +313,7 @@ struct ToneCurveSection: View {
                 Spacer()
                 Text(String(format: "%.0f", value.wrappedValue))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
             Slider(value: value, in: 0...100, step: 1, onEditingChanged: { model.sliderEditingChanged($0) })
         }
@@ -342,8 +342,8 @@ struct PointCurveEditor: View {
             Self.draw(context: context, size: size, points: currentPoints, channel: channel)
         }
         .frame(width: Self.canvasSize, height: Self.canvasSize)
-        .background(Color.black.opacity(0.28))
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.15)))
+        .background(NihoPalette.well)
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(NihoPalette.line))
         .contentShape(Rectangle())
         .gesture(dragGesture)
     }
@@ -520,12 +520,12 @@ struct PointCurveEditor: View {
             grid.move(to: CGPoint(x: 0, y: t * size.height))
             grid.addLine(to: CGPoint(x: size.width, y: t * size.height))
         }
-        context.stroke(grid, with: .color(.white.opacity(0.08)))
+        context.stroke(grid, with: .color(NihoPalette.heading.opacity(0.08)))
 
         var diagonal = Path()
         diagonal.move(to: CGPoint(x: 0, y: size.height))
         diagonal.addLine(to: CGPoint(x: size.width, y: 0))
-        context.stroke(diagonal, with: .color(.white.opacity(0.2)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        context.stroke(diagonal, with: .color(NihoPalette.heading.opacity(0.25)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
 
         let screenPoints = points.map { CGPoint(x: $0.x * size.width, y: (1 - $0.y) * size.height) }
         let tint = curveColor(for: channel)
@@ -544,10 +544,10 @@ struct PointCurveEditor: View {
 
     private static func curveColor(for channel: ToneCurveChannel) -> Color {
         switch channel {
-        case .rgb: .white
-        case .red: .red
-        case .green: .green
-        case .blue: .blue
+        case .rgb: NihoPalette.ink
+        case .red: Color(nihoHex: 0xC0504A)
+        case .green: Color(nihoHex: 0x4D8F52)
+        case .blue: Color(nihoHex: 0x3F6FA8)
         }
     }
 }
@@ -632,7 +632,7 @@ struct HSLSection: View {
                 Spacer()
                 Text(String(format: "%.0f", value.wrappedValue))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
             Slider(value: value, in: -100...100, step: 1, onEditingChanged: { model.sliderEditingChanged($0) })
         }
@@ -673,12 +673,12 @@ struct ColorGradingSection: View {
                     if band == .midtone || band == .global {
                         Text("輝度は現時点で描画に反映されません（値は保持されます）。")
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                     }
                 }
             }
 
-            Divider()
+            NihoDivider()
 
             blendingSlider
             balanceSlider
@@ -705,7 +705,7 @@ struct ColorGradingSection: View {
                 Spacer()
                 Text(String(format: "%.0f", value.wrappedValue))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
             Slider(value: value, in: 0...360, step: 1, onEditingChanged: { model.sliderEditingChanged($0) })
             hueWheel
@@ -733,7 +733,7 @@ struct ColorGradingSection: View {
                 Spacer()
                 Text(String(format: "%.0f", value.wrappedValue))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
             Slider(value: value, in: range, step: 1, onEditingChanged: { model.sliderEditingChanged($0) })
         }
@@ -750,7 +750,7 @@ struct ColorGradingSection: View {
                 Spacer()
                 Text(String(format: "%.0f", value.wrappedValue))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
             Slider(value: value, in: 0...100, step: 1, onEditingChanged: { model.sliderEditingChanged($0) })
         }
@@ -767,7 +767,7 @@ struct ColorGradingSection: View {
                 Spacer()
                 Text(String(format: "%.0f", value.wrappedValue))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
             Slider(value: value, in: -100...100, step: 1, onEditingChanged: { model.sliderEditingChanged($0) })
         }
@@ -782,7 +782,7 @@ struct CalibrationSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             slider("シャドウ色かぶり", \.shadowTint)
-            Divider()
+            NihoDivider()
             Text("レッド").font(.caption.weight(.semibold))
             slider("色相", \.redHue)
             slider("彩度", \.redSaturation)
@@ -806,7 +806,7 @@ struct CalibrationSection: View {
                 Spacer()
                 Text(String(format: "%.0f", value.wrappedValue))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
             Slider(value: value, in: -100...100, step: 1, onEditingChanged: { model.sliderEditingChanged($0) })
         }

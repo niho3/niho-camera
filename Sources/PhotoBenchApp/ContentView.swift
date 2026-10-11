@@ -17,19 +17,21 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            Divider()
+            NihoDivider()
             HStack(spacing: 0) {
                 libraryPane
-                Divider()
+                NihoDivider()
                 centerPane
-                Divider()
+                NihoDivider()
                 inspectorPane
             }
-            Divider()
+            NihoDivider()
             statusBar
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .preferredColorScheme(.dark)
+        .background(NihoPalette.canvas)
+        .foregroundStyle(NihoPalette.ink)
+        .tint(NihoPalette.green)
+        .preferredColorScheme(.light)
         .confirmationDialog(
             "「\(presetPendingDeletion?.name ?? "プリセット")」を削除しますか？",
             isPresented: Binding(
@@ -58,41 +60,38 @@ struct ContentView: View {
                 .disabled(!model.canChooseFolder)
             Button("プリセットを読み込む", action: model.importPreset)
                 .disabled(model.isBusy)
-            Divider().frame(height: 18)
+            NihoDivider().frame(height: 18)
             Text(model.selectedAsset?.filename ?? "写真を選択")
-                .font(.headline)
+                .font(.headline).foregroundStyle(NihoPalette.heading)
                 .lineLimit(1)
             Spacer()
             if model.decodeInfo?.isRAW == true {
                 Label("RAW", systemImage: "camera.aperture")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(NihoPalette.coralInk)
             }
             if let info = model.decodeInfo, info.isRAW {
                 let isCalibratedDCS5 = info.calibrationID
                     == RAWCalibrationProfile.panasonicDCS5Lightroom93.id
-                Text(isCalibratedDCS5 ? "DC-S5 色差試験（白飛び未校正）" : "機種別の色は未校正")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(Color.orange.opacity(0.16), in: Capsule())
-                    .foregroundStyle(.orange)
+                NihoChip(
+                    text: isCalibratedDCS5 ? "DC-S5 色差試験（白飛び未校正）" : "機種別の色は未校正",
+                    foreground: NihoPalette.coralInk,
+                    background: NihoPalette.coralTint
+                )
             }
             if model.preset != nil {
-                Text("XMP近似・未校正")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(Color.yellow.opacity(0.16), in: Capsule())
-                    .foregroundStyle(.yellow)
+                NihoChip(
+                    text: "XMP近似・未校正",
+                    foreground: NihoPalette.caution,
+                    background: NihoPalette.creamTint
+                )
             }
             if model.previewRoute == .metalDirect {
-                Text("Metal直接表示・検証中")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(Color.blue.opacity(0.16), in: Capsule())
-                    .foregroundStyle(.blue)
+                NihoChip(
+                    text: "Metal直接表示・検証中",
+                    foreground: NihoPalette.navy,
+                    background: NihoPalette.skyTint
+                )
             }
             Menu("書き出す") {
                 Button("JPEGを書き出す", action: model.exportFromPanel)
@@ -110,29 +109,31 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("写真")
-                    .font(.headline)
+                    .font(.headline).foregroundStyle(NihoPalette.heading)
                 Text(model.rootURL?.path ?? "写真フォルダを選択してください")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
                     .lineLimit(2)
             }
             .padding(12)
-            Divider()
+            NihoDivider()
             List(model.assets, selection: $model.selectedAssetID) { asset in
                 HStack(spacing: 8) {
                     Image(systemName: asset.kind == .raw ? "camera.aperture" : "photo")
-                        .foregroundStyle(asset.kind == .raw ? .orange : .secondary)
+                        .foregroundStyle(asset.kind == .raw ? NihoPalette.coralInk : NihoPalette.muted)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(asset.filename)
                             .lineLimit(1)
                         Text(asset.kind.rawValue)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                     }
                 }
                 .tag(asset.id)
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .background(NihoPalette.canvas)
             .disabled(model.isBusy)
         }
         .frame(width: 230)
@@ -145,7 +146,7 @@ struct ContentView: View {
                     if model.isShowingCutout {
                         CheckerboardBackground()
                     } else {
-                        Color.black.opacity(0.82)
+                        NihoPalette.photoStage
                     }
                     if model.previewRoute == .metalDirect,
                        !model.isShowingCutout,
@@ -165,6 +166,7 @@ struct ContentView: View {
                             .interpolation(.high)
                             .antialiased(true)
                             .aspectRatio(contentMode: .fit)
+                            .shadow(color: NihoPalette.heading.opacity(0.14), radius: 10, y: 3)
                             .padding(20)
                     } else if model.isBusy || model.hasPreviewInFlight {
                         ProgressView("プレビューを準備中…")
@@ -243,14 +245,15 @@ struct ContentView: View {
                         VStack(spacing: 4) {
                             ZStack {
                                 RoundedRectangle(cornerRadius: 4)
-                                    .fill(asset.kind == .raw ? Color.orange.opacity(0.18) : Color.white.opacity(0.08))
+                                    .fill(asset.kind == .raw ? NihoPalette.coralTint : NihoPalette.creamTint)
                                 Image(systemName: asset.kind == .raw ? "camera.aperture" : "photo")
                                     .font(.title2)
+                                    .foregroundStyle(asset.kind == .raw ? NihoPalette.coralInk : NihoPalette.muted)
                             }
                             .frame(width: 74, height: 48)
                             .overlay {
                                 if model.selectedAssetID == asset.id {
-                                    RoundedRectangle(cornerRadius: 4).stroke(.white, lineWidth: 2)
+                                    RoundedRectangle(cornerRadius: 4).stroke(NihoPalette.green, lineWidth: 2)
                                 }
                             }
                             Text(asset.filename)
@@ -266,7 +269,7 @@ struct ContentView: View {
             .padding(10)
         }
         .frame(height: 86)
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(NihoPalette.filmstrip)
     }
 
     private var inspectorPane: some View {
@@ -274,7 +277,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("背景").font(.headline)
+                        Text("背景").font(.headline).foregroundStyle(NihoPalette.heading)
                         Spacer()
                         if model.isCutoutRunning {
                             ProgressView().controlSize(.small)
@@ -290,7 +293,7 @@ struct ContentView: View {
                         .disabled(!model.canEdit)
                         Text("Apple Visionが端末内で人物・家具・商品を検出します。")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                     } else {
                         Picker("被写体", selection: Binding(
                             get: { model.selectedCutoutSubject ?? .all },
@@ -326,7 +329,7 @@ struct ContentView: View {
                         }
                         Text("プレビュー上をドラッグしてマスクを補正します。")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                         HStack {
                             Button("再検出", action: model.startBackgroundRemoval)
                             Button("背景編集を解除", role: .destructive, action: model.removeBackgroundEdit)
@@ -336,31 +339,31 @@ struct ContentView: View {
                     if let error = model.cutoutMaskErrorMessage {
                         Text(error)
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(NihoPalette.danger)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
-                Divider()
+                NihoDivider()
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("プリセットライブラリ").font(.headline)
+                        Text("プリセットライブラリ").font(.headline).foregroundStyle(NihoPalette.heading)
                         Spacer()
                         Text("\(model.presetLibrary.count)")
                             .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                     }
                     if let error = model.presetLibraryErrorMessage {
                         Text(error)
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(NihoPalette.danger)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if model.presetLibrary.isEmpty {
                         Text("XMPを読み込むとここに登録されます。")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                     }
                     ForEach(model.presetLibrary) { item in
                         HStack(spacing: 6) {
@@ -371,7 +374,7 @@ struct ContentView: View {
                                     Text(model.presetDisplayName(for: item)).lineLimit(1)
                                     Text(item.isBuiltIn ? "標準" : "ユーザー登録")
                                         .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(NihoPalette.muted)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
@@ -379,7 +382,7 @@ struct ContentView: View {
                             .disabled(!model.canEdit)
                             if model.editSnapshot.appliedPresetID == item.id {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
+                                    .foregroundStyle(NihoPalette.green)
                                     .help("この写真へ適用中")
                             }
                             Button {
@@ -394,10 +397,10 @@ struct ContentView: View {
                     }
                 }
 
-                Divider()
+                NihoDivider()
 
                 HStack {
-                    Text("編集").font(.headline)
+                    Text("編集").font(.headline).foregroundStyle(NihoPalette.heading)
                     Spacer()
                     Button("戻る", systemImage: "arrow.uturn.backward", action: model.undo)
                         .labelStyle(.iconOnly)
@@ -417,18 +420,18 @@ struct ContentView: View {
                     DisclosureGroup(isExpanded: $isBasicSectionExpanded) {
                         VStack(alignment: .leading, spacing: 14) {
                             WhiteBalanceSection()
-                            Divider()
+                            NihoDivider()
                             AdjustmentSliderView(label: "露光量", keyPath: \.exposure, range: -5...5, format: "%.2f")
                             AdjustmentSliderView(label: "コントラスト", keyPath: \.contrast, range: -100...100, format: "%.0f")
                             AdjustmentSliderView(label: "ハイライト", keyPath: \.highlights, range: -100...100, format: "%.0f")
                             AdjustmentSliderView(label: "シャドウ", keyPath: \.shadows, range: -100...100, format: "%.0f")
                             AdjustmentSliderView(label: "白レベル", keyPath: \.whites, range: -100...100, format: "%.0f")
                             AdjustmentSliderView(label: "黒レベル", keyPath: \.blacks, range: -100...100, format: "%.0f")
-                            Divider()
+                            NihoDivider()
                             AdjustmentSliderView(label: "テクスチャ", keyPath: \.texture, range: -100...100, format: "%.0f")
                             AdjustmentSliderView(label: "明瞭度", keyPath: \.clarity, range: -100...100, format: "%.0f")
                             AdjustmentSliderView(label: "かすみの除去", keyPath: \.dehaze, range: -100...100, format: "%.0f")
-                            Divider()
+                            NihoDivider()
                             AdjustmentSliderView(label: "自然な彩度", keyPath: \.vibrance, range: -100...100, format: "%.0f")
                             AdjustmentSliderView(label: "彩度", keyPath: \.saturation, range: -100...100, format: "%.0f")
                         }
@@ -440,7 +443,7 @@ struct ContentView: View {
                         }
                     }
 
-                    Divider()
+                    NihoDivider()
 
                     DisclosureGroup {
                         ToneCurveSection()
@@ -449,7 +452,7 @@ struct ContentView: View {
                         SectionHeader(title: "トーンカーブ") { model.resetSection(.toneCurve) }
                     }
 
-                    Divider()
+                    NihoDivider()
 
                     DisclosureGroup {
                         HSLSection()
@@ -458,7 +461,7 @@ struct ContentView: View {
                         SectionHeader(title: "HSL") { model.resetSection(.hsl) }
                     }
 
-                    Divider()
+                    NihoDivider()
 
                     DisclosureGroup {
                         ColorGradingSection()
@@ -467,7 +470,7 @@ struct ContentView: View {
                         SectionHeader(title: "カラーグレーディング") { model.resetSection(.colorGrading) }
                     }
 
-                    Divider()
+                    NihoDivider()
 
                     DisclosureGroup {
                         CalibrationSection()
@@ -479,20 +482,20 @@ struct ContentView: View {
                 .disabled(!model.canEdit)
 
                 if let preset = model.preset {
-                    Divider()
+                    NihoDivider()
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("適用中のプリセット").font(.headline)
+                        Text("適用中のプリセット").font(.headline).foregroundStyle(NihoPalette.heading)
                         Text(model.appliedPresetDisplayName ?? preset.name)
                             .font(.subheadline.weight(.semibold))
                         Text("Process \(preset.processVersion ?? "不明") / Camera Raw \(preset.cameraRawVersion ?? "不明")")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                         let supported = preset.compatibility.filter { $0.level == .supported }.count
                         let approximate = preset.compatibility.filter { $0.level == .approximate }.count
                         let unsupported = preset.compatibility.filter { $0.level == .unsupported }.count
                         Text("対応 \(supported) ・ 近似 \(approximate) ・ 未対応 \(unsupported)")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                         DisclosureGroup("互換性の詳細") {
                             VStack(alignment: .leading, spacing: 6) {
                                 ForEach(preset.compatibility.filter { $0.level != .metadata }) { item in
@@ -505,7 +508,7 @@ struct ContentView: View {
                                             Text(item.property).font(.caption)
                                             Text("\(item.value) — \(item.note)")
                                                 .font(.caption2)
-                                                .foregroundStyle(.secondary)
+                                                .foregroundStyle(NihoPalette.muted)
                                         }
                                     }
                                 }
@@ -605,12 +608,12 @@ struct ContentView: View {
             if model.isBusy { ProgressView().controlSize(.small) }
             Text(model.statusMessage)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
                 .lineLimit(1)
             Spacer()
             Text(model.unsavedStatusMessage ?? model.persistenceMessage)
                 .font(.caption2)
-                .foregroundStyle(model.hasSaveFailures || model.persistenceStatus.isFailure ? .red : .secondary)
+                .foregroundStyle(model.hasSaveFailures || model.persistenceStatus.isFailure ? NihoPalette.danger : NihoPalette.muted)
                 .lineLimit(2)
                 .frame(maxWidth: 340, alignment: .leading)
                 .help(model.unsavedStatusMessage ?? model.persistenceMessage)
@@ -624,14 +627,14 @@ struct ContentView: View {
             }
             Text("原本は上書きしません")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
             Text("・プレビュー/書き出し: sRGB")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
             if model.previewRoute == .metalDirect {
                 Text("・present \(model.directPresentedCount) / coalesce \(model.directCoalescedCount) / drawable nil \(model.directDrawableUnavailableCount) / drop \(model.directDroppedCount)")
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
         }
         .padding(.horizontal, 12)
@@ -640,10 +643,10 @@ struct ContentView: View {
 
     private func color(for level: CompatibilityLevel) -> Color {
         switch level {
-        case .supported: .green
-        case .approximate: .yellow
-        case .unsupported: .red
-        case .metadata: .secondary
+        case .supported: NihoPalette.green
+        case .approximate: NihoPalette.caution
+        case .unsupported: NihoPalette.danger
+        case .metadata: NihoPalette.muted
         }
     }
 }
@@ -780,7 +783,12 @@ private struct DirectMetalPreviewView: NSViewRepresentable {
             metalView.colorPixelFormat = MetalPreviewRenderer.pixelFormat
             metalView.colorspace = MetalPreviewRenderer.outputColorSpace
             metalView.sampleCount = 1
-            metalView.clearColor = MTLClearColorMake(0, 0, 0, 1)
+            metalView.clearColor = MTLClearColorMake(
+                NihoPalette.photoStageRGB.red,
+                NihoPalette.photoStageRGB.green,
+                NihoPalette.photoStageRGB.blue,
+                1
+            )
             metalView.isPaused = true
             metalView.enableSetNeedsDisplay = true
             metalView.autoResizeDrawable = true
