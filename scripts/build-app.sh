@@ -29,6 +29,9 @@ fi
     "$PHOTO_CONTENTS_DIR/MacOS/PhotoBench"
 /bin/cp "$PHOTO_APP_DIR/Resources/Info.plist" "$PHOTO_CONTENTS_DIR/Info.plist"
 /usr/bin/install -m 644 \
+    "$PHOTO_APP_DIR/Resources/AppIcon.icns" \
+    "$PHOTO_CONTENTS_DIR/Resources/AppIcon.icns"
+/usr/bin/install -m 644 \
     "$PHOTO_APP_DIR/niho-priset_colorful.xmp" \
     "$PHOTO_APP_DIR/niho-preset bluesky2.xmp" \
     "$PHOTO_APP_DIR/bluesky2-updated.xmp" \
